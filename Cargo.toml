@@ -1,0 +1,93 @@
+[package]
+name = "vibevoice-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Error handling
+anyhow = "1.0"
+
+# Args
+clap = { version = "4.5", features = ["derive"] }
+
+# Candle ML framework - core functionality
+candle-core = { git = "https://github.com/danielclough/candle", branch = "fix/qwen2-precision-and-kv-cache" }
+candle-nn = { git = "https://github.com/danielclough/candle", branch = "fix/qwen2-precision-and-kv-cache" }
+candle-transformers = { git = "https://github.com/danielclough/candle", branch = "fix/qwen2-precision-and-kv-cache" }
+
+# HuggingFace Hub integration
+candle-hf-hub = "0.3.2"
+
+# Tokenization
+tokenizers = "0.19"
+
+# Regex for script parsing
+regex = "1.10"
+
+# JSON parsing for model config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Audio file writing (WAV format)
+hound = "3.5"
+rubato = "0.16.2"
+
+# Random number generation for seeding
+rand_distr = "0.5.1"
+rand_mt = "5.0"  # Mersenne Twister to match Python's torch.Generator
+
+# Testing and checkpointing
+ndarray = "0.16"
+ndarray-npy = "0.9.1"
+
+# Optional: accelerate for macOS CPU optimization
+accelerate-src = { version = "0.3.2", optional = true }
+
+# Optional: Intel MKL for CPU optimization
+intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"], optional = true }
+bytemuck = "1.24.0"
+
+[features]
+default = []
+
+# CUDA support for NVIDIA GPUs
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+# cuDNN for optimized CUDA operations
+cudnn = ["candle-core/cudnn", "candle-nn/cudnn"]
+
+# Metal support for Apple Silicon (M1/M2/M3)
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+
+# Flash Attention 2 for faster attention (CUDA only)
+flash-attn = ["candle-transformers/flash-attn"]
+
+# Accelerate framework for macOS CPU optimization
+accelerate = [
+    "dep:accelerate-src",
+    "candle-core/accelerate",
+    "candle-nn/accelerate",
+    "candle-transformers/accelerate",
+]
+
+# Intel MKL for optimized CPU operations
+mkl = [
+    "dep:intel-mkl-src",
+    "candle-core/mkl",
+    "candle-nn/mkl",
+]
+
+# All GPU features (CUDA + cuDNN + flash-attn)
+gpu = ["cuda", "cudnn", "flash-attn"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1

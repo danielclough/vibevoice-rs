@@ -1,0 +1,533 @@
+use anyhow::{Error as AnyErr, Result};
+use candle_core::{D, DType, Device, Tensor};
+use candle_hf_hub::api::sync::Api;
+use candle_nn::VarBuilder;
+use rand_distr::{Distribution, Normal};
+use rand_mt::Mt64; // Mersenne Twister 64-bit (MT19937-64) to match Python's torch.Generator
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
+use serde_json;
+use std::fs::File;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::{fs, path::Path};
+use tracing::{debug, error, info, warn};
+
+/// Global CPU RNG for deterministic random generation across all functions.
+/// Uses Mersenne Twister 64-bit (MT19937-64) to match Python's torch.Generator algorithm.
+/// This MUST be at module level to be shared between set_all_seeds() and seeded_randn().
+static GLOBAL_CPU_RNG: Mutex<Option<Mt64>> = Mutex::new(None);
+/// Device selection with CUDA and Metal support
+pub fn get_device(cuda_device: Option<usize>) -> Result<Device> {
+    if let Some(ordinal) = cuda_device {
+        match Device::new_cuda(ordinal) {
+            Ok(device) => {
+                info!("Using CUDA device {}", ordinal);
+                return Ok(device);
+            }
+            Err(e) => info!("CUDA not available: {}, trying Metal...", e),
+        }
+    }
+    match Device::new_metal(0) {
+        Ok(device) => {
+            info!("Using Metal device");
+            Ok(device)
+        }
+        Err(_) => {
+            info!("Metal not available, falling back to CPU");
+            Ok(Device::Cpu)
+        }
+    }
+}
+
+/// Set all random seeds for full reproducibility across CPU, CUDA, and Metal.
+/// This function must be called BEFORE any model loading to ensure deterministic behavior.
+/// Uses Mersenne Twister (MT19937) to match Python's torch.Generator.
+pub fn set_all_seeds(seed: u64, device: &Device) -> Result<()> {
+    // Set device seed (works for CUDA/Metal, no-op for CPU)
+    device.set_seed(seed)?;
+
+    // Seed the GLOBAL CPU RNG with Mersenne Twister 64-bit to match Python's torch.Generator
+    let mut rng_guard = GLOBAL_CPU_RNG.lock().unwrap();
+    *rng_guard = Some(Mt64::new(seed));
+
+    debug!(
+        "🎲 All random seeds set to {} (device + MT19937 CPU RNG)",
+        seed
+    );
+    Ok(())
+}
+
+/// Generate a seeded random normal tensor using the global CPU RNG.
+/// ALWAYS generates on CPU for true determinism, then transfers to target device.
+/// This ensures reproducible results across CPU, CUDA, and Metal.
+pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Result<Tensor> {
+    // Always use the global CPU RNG for determinism
+    // GPU random generation (Tensor::randn on Metal/CUDA) may not respect seeds properly
+    let mut rng_guard = GLOBAL_CPU_RNG.lock().unwrap();
+
+    if let Some(ref mut rng) = *rng_guard {
+        let normal = Normal::new(mean, std)
+            .map_err(|e| anyhow::anyhow!("Invalid normal distribution parameters: {}", e))?;
+
+        let elem_count = shape.iter().product::<usize>();
+        let mut data = Vec::with_capacity(elem_count);
+
+        for _ in 0..elem_count {
+            data.push(normal.sample(rng) as f32);
+        }
+
+        // Create tensor on CPU first
+        let cpu_tensor = Tensor::from_vec(data, shape, &Device::Cpu)?;
+
+        // Transfer to target device if needed
+        if matches!(device, Device::Cpu) {
+            Ok(cpu_tensor)
+        } else {
+            Ok(cpu_tensor.to_device(device)?)
+        }
+    } else {
+        // Fallback if RNG not initialized - this shouldn't happen if set_all_seeds was called
+        warn!("⚠️ Global CPU RNG not initialized! Random values will NOT be reproducible.");
+        warn!("   Make sure to call set_all_seeds() before generating random tensors.");
+        Ok(Tensor::randn(mean as f32, std as f32, shape, device)?)
+    }
+}
+pub fn download_model_files(repo_id: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    info!("Downloading model files from {}...", repo_id);
+
+    let api = Api::new().map_err(|e| AnyErr::msg(format!("Failed to create HF API: {}", e)))?;
+    let repo = api.model(repo_id.to_string());
+
+    // Download config.json - use its parent as the model directory (HF cache snapshot dir)
+    let config_path = repo
+        .get("config.json")
+        .map_err(|e| AnyErr::msg(format!("Failed to download config.json: {}", e)))?;
+    let model_dir = config_path.parent().unwrap().to_path_buf();
+    debug!("Model directory (HF cache): {:?}", model_dir);
+
+    // Try to read preprocessor_config.json to determine tokenizer source
+    let tokenizer_repo_id = match repo.get("preprocessor_config.json") {
+        Ok(preprocessor_path) => {
+            let preprocessor_content = fs::read_to_string(&preprocessor_path)?;
+            let preprocessor_config: serde_json::Value =
+                serde_json::from_str(&preprocessor_content)?;
+            let language_model_name = preprocessor_config
+                .get("language_model_pretrained_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Qwen/Qwen2.5-1.5B");
+            debug!("Using tokenizer from: {}", language_model_name);
+            language_model_name.to_string()
+        }
+        Err(_) => {
+            debug!("preprocessor_config.json not found, using default tokenizer");
+            "Qwen/Qwen2.5-1.5B".to_string()
+        }
+    };
+
+    let index_path = repo
+        .get("model.safetensors.index.json")
+        .map_err(|e| AnyErr::msg(format!("Failed to download index: {}", e)))?;
+    // Parse index to get actual shard filenames
+    let index_content = std::fs::read_to_string(&index_path)?;
+    let index_json: serde_json::Value = serde_json::from_str(&index_content)?;
+    let weight_map = index_json["weight_map"]
+        .as_object()
+        .ok_or_else(|| AnyErr::msg("Invalid index.json: missing weight_map"))?;
+    // Get unique shard filenames
+    let shard_filenames_set: std::collections::HashSet<String> = weight_map
+        .values()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect();
+    let mut shard_filenames: Vec<String> = shard_filenames_set.into_iter().collect();
+    shard_filenames.sort();
+
+    // Download tokenizer from language model (e.g., Qwen)
+    let tokenizer_repo = api.model(tokenizer_repo_id.clone());
+    let tokenizer_path = tokenizer_repo.get("tokenizer.json").map_err(|e| {
+        AnyErr::msg(format!(
+            "Failed to download tokenizer.json from {}: {}",
+            tokenizer_repo_id, e
+        ))
+    })?;
+
+    // Download optional tokenizer files from base model
+    for file in &[
+        "vocab.json",
+        "merges.txt",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ] {
+        let _ = tokenizer_repo.get(file);
+    }
+
+    // Download model shards to HF cache
+    info!("📦 Downloading {} model shards...", shard_filenames.len());
+    for (i, filename) in shard_filenames.iter().enumerate() {
+        debug!("  Shard {}/{}: {}", i + 1, shard_filenames.len(), filename);
+        repo.get(filename)
+            .map_err(|e| AnyErr::msg(format!("Failed to download {}: {}", filename, e)))?;
+    }
+
+    info!("✓ Model cached in {:?}", model_dir);
+
+    Ok((model_dir, config_path, tokenizer_path))
+}
+/// Sinusoidal timestep embedding for diffusion
+pub fn timestep_embedding(timesteps: &Tensor, dim: usize) -> Result<Tensor> {
+    let device = timesteps.device();
+    let half_dim = dim / 2;
+    let emb_scale = -(10000.0_f32.ln()) / half_dim as f32;
+    let positions = Tensor::arange(0f32, half_dim as f32, device)?;
+    let emb = positions.affine(emb_scale as f64, 0.0)?.exp()?;
+    let emb = timesteps
+        .unsqueeze(D::Minus1)?
+        .broadcast_mul(&emb.unsqueeze(0)?)?;
+    let emb_sin = emb.sin()?;
+    let emb_cos = emb.cos()?;
+    Ok(Tensor::cat(&[&emb_cos, &emb_sin], D::Minus1)?)
+}
+/// Save audio tensor to WAV file
+pub fn save_audio_wav(audio: &Tensor, path: &str, sample_rate: u32) -> Result<()> {
+    let audio_data = audio.flatten_all()?.to_vec1::<f32>()?;
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)?;
+    for sample in audio_data {
+        let amplitude = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        writer.write_sample(amplitude)?;
+    }
+    writer.finalize()?;
+    info!("\n💾 Saved audio to: {}", path);
+    Ok(())
+}
+use std::collections::HashMap;
+pub fn create_remapped_varbuilder<'a>(
+    model_dir: &PathBuf,
+    device: &'a Device,
+) -> Result<VarBuilder<'a>> {
+    let mut shard_files: Vec<PathBuf> = std::fs::read_dir(model_dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext == "safetensors")
+                .unwrap_or(false)
+        })
+        .collect();
+    shard_files.sort();
+    // Load all tensors and remap names
+    let mut all_tensors: HashMap<String, Tensor> = HashMap::new();
+    let mut encoder_weights_found = Vec::new();
+    let mut decoder_weights_found = Vec::new();
+
+    for shard_file in &shard_files {
+        let tensors = candle_core::safetensors::load(shard_file, device)?;
+        for (name, tensor) in tensors {
+            // Track encoder and decoder components
+            if name.contains("acoustic_tokenizer.encoder") {
+                encoder_weights_found.push(name.clone());
+            }
+            if name.contains("acoustic_tokenizer.decoder") {
+                decoder_weights_found.push(name.clone());
+            }
+            let new_name = if name.starts_with("model.language_model.") {
+                name.replace("model.language_model.", "model.")
+            } else if name.starts_with("model.acoustic_tokenizer.") {
+                // Acoustic tokenizer: model.acoustic_tokenizer.X → acoustic_tokenizer.X
+                name.strip_prefix("model.").unwrap().to_string()
+            } else if name.starts_with("model.acoustic_connector.") {
+                // Acoustic connector: model.acoustic_connector.X → acoustic_connector.X
+                name.strip_prefix("model.").unwrap().to_string()
+            } else if name.starts_with("model.semantic_") {
+                // Semantic stuff: model.semantic_X → semantic_X
+                name.strip_prefix("model.").unwrap().to_string()
+            } else {
+                // Everything else (like lm_head): keep as-is
+                name
+            };
+            all_tensors.insert(new_name, tensor);
+        }
+    }
+
+    // Validate VAE components
+    if decoder_weights_found.is_empty() {
+        error!("❌ NO VAE DECODER WEIGHTS FOUND!");
+    }
+    if encoder_weights_found.is_empty() {
+        error!("❌ NO VAE ENCODER WEIGHTS FOUND!");
+        warn!("⚠️  Voice cloning will NOT be possible without encoder!");
+    }
+
+    debug!(
+        "🔍 VAE components: {} encoder weights, {} decoder weights",
+        encoder_weights_found.len(),
+        decoder_weights_found.len()
+    );
+
+    // Use BF16 for GPU, F32 for CPU
+    let dtype = if device.is_cuda() {
+        DType::F16 // CUDA supports F16 for matmul
+    } else if device.is_metal() {
+        DType::F32 // Metal may not support BF16/F16 matmul, use F32
+    } else {
+        DType::F32 // CPU uses F32
+    };
+    // // DEBUG
+    // info!("\n🔍 DEBUG lm_head patterns:");
+    // for key in all_tensors.keys() {
+    //     if key.contains("lm_head") || key.contains("embed") || key.ends_with("weight") && !key.contains("layers") {
+    //         info!("  {}", key);
+    //     }
+    // }
+    // Create VarBuilder from remapped tensors
+    Ok(VarBuilder::from_tensors(all_tensors, dtype, device))
+}
+/// Normalize audio to target dB FS level
+/// Matches Python AudioNormalizer exactly:
+///   1. tailor_dB_FS: scalar = 10^(target_dB_FS/20) / (rms + eps)
+///   2. avoid_clipping: if max > 1.0, divide by max
+pub fn normalize_audio_db_fs(audio: &Tensor, target_db_fs: f32) -> Result<Tensor> {
+    debug!("Audio normalization input shape: {:?}", audio.dims());
+
+    const EPS: f32 = 1e-6; // Match Python eps
+
+    // Step 1: tailor_dB_FS - Calculate RMS and scale to target dB FS
+    let squared = audio.sqr()?;
+    let mean = squared.mean_all()?.to_scalar::<f32>()?;
+    let rms = mean.sqrt();
+
+    // Convert target dB FS to linear scale: amplitude = 10^(dB_FS / 20)
+    let target_amplitude = 10.0_f32.powf(target_db_fs / 20.0);
+
+    // Scale factor with eps to avoid division by zero (matches Python)
+    let scale_factor = target_amplitude / (rms + EPS);
+    let normalized = audio.affine(scale_factor as f64, 0.0)?;
+
+    // Step 2: avoid_clipping - Scale down if max amplitude > 1.0
+    let max_abs = normalized.abs()?.max_all()?.to_scalar::<f32>()?;
+    let final_audio = if max_abs > 1.0 {
+        let clip_scale = 1.0 / (max_abs + EPS);
+        normalized.affine(clip_scale as f64, 0.0)?
+    } else {
+        normalized
+    };
+
+    debug!("Audio normalization output shape: {:?}", final_audio.dims());
+    Ok(final_audio)
+}
+pub fn load_audio_wav(path: &str, target_sample_rate: u32) -> Result<Tensor> {
+    // Check for pre-resampled 24kHz version first (avoids resampling differences with Python)
+    let path_obj = std::path::Path::new(path);
+    let actual_path = if let Some(filename) = path_obj.file_name() {
+        let presampled_path = std::path::Path::new("voices_24k").join(filename);
+        if presampled_path.exists() && target_sample_rate == 24000 {
+            info!("  📁 Using pre-resampled 24kHz: {:?}", presampled_path);
+            presampled_path.to_string_lossy().to_string()
+        } else {
+            debug!(
+                "Pre-resampled not found at {:?}, using original: {}",
+                presampled_path, path
+            );
+            path.to_string()
+        }
+    } else {
+        path.to_string()
+    };
+
+    debug!("Loading audio from: {}", actual_path);
+
+    let mut reader = hound::WavReader::open(&actual_path)
+        .map_err(|e| candle_core::Error::Msg(format!("Failed to open WAV: {}", e)))?;
+
+    let spec = reader.spec();
+    debug!(
+        "WAV spec: channels={}, sample_rate={}, bits_per_sample={}",
+        spec.channels, spec.sample_rate, spec.bits_per_sample
+    );
+
+    // Read samples based on bit depth
+    let samples: Vec<f32> = if spec.bits_per_sample == 16 {
+        reader
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect()
+    } else if spec.bits_per_sample == 32 {
+        reader
+            .samples::<i32>()
+            .map(|s| s.unwrap() as f32 / 2147483648.0)
+            .collect()
+    } else {
+        return Err(anyhow::Error::msg(format!(
+            "Unsupported bit depth: {}. Only 16 and 32 bits are supported.",
+            spec.bits_per_sample
+        )));
+    };
+
+    debug!("Loaded {} raw samples", samples.len());
+
+    // Convert to mono if stereo
+    let mono_samples: Vec<f32> = if spec.channels == 2 {
+        samples
+            .chunks(2)
+            .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
+            .collect()
+    } else if spec.channels == 1 {
+        samples
+    } else {
+        // For multi-channel (>2), average all channels
+        let chunk_size = spec.channels as usize;
+        samples
+            .chunks(chunk_size)
+            .map(|chunk| chunk.iter().sum::<f32>() / chunk.len() as f32)
+            .collect()
+    };
+
+    debug!("After mono conversion: {} samples", mono_samples.len());
+
+    // Resample if needed
+    let final_samples = if spec.sample_rate != target_sample_rate {
+        debug!(
+            "Resampling from {} Hz to {} Hz",
+            spec.sample_rate, target_sample_rate
+        );
+
+        let resampled = resample_audio(&mono_samples, spec.sample_rate, target_sample_rate)
+            .map_err(|e| candle_core::Error::Msg(format!("Resampling failed: {}", e)))?;
+
+        debug!("After resampling: {} samples", resampled.len());
+        resampled
+    } else {
+        mono_samples
+    };
+
+    debug!("Final sample count: {}", final_samples.len());
+    debug!(
+        "Expected VAE tokens: {}",
+        (final_samples.len() as f32 / 3200.0).ceil()
+    );
+
+    // Create tensor [1, 1, samples] to match Python's shape
+    let tensor = Tensor::from_vec(
+        final_samples.clone(),
+        (1, 1, final_samples.len()),
+        &Device::Cpu,
+    )?;
+
+    info!(
+        "✓ Loaded audio: {} samples @ {}Hz",
+        final_samples.len(),
+        target_sample_rate
+    );
+
+    Ok(tensor)
+}
+
+fn resample_audio(
+    samples: &[f32],
+    source_rate: u32,
+    target_rate: u32,
+) -> std::result::Result<Vec<f32>, String> {
+    if source_rate == target_rate {
+        return Ok(samples.to_vec());
+    }
+
+    // Calculate the expected output length (matching librosa's calculation)
+    let resample_ratio = target_rate as f64 / source_rate as f64;
+    let expected_len = (samples.len() as f64 * resample_ratio).round() as usize;
+
+    // Use high-quality sinc interpolation parameters matching librosa's kaiser_best
+    let params = SincInterpolationParameters {
+        sinc_len: 256, // High quality
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
+
+    // Create resampler
+    let mut resampler = SincFixedIn::<f32>::new(
+        resample_ratio,
+        2.0, // max_resample_ratio_relative
+        params,
+        samples.len(),
+        1, // mono channel
+    )
+    .map_err(|e| format!("Failed to create resampler: {}", e))?;
+
+    // Prepare input as Vec<Vec<f32>> (channel-first format)
+    let input_channels = vec![samples.to_vec()];
+
+    // Perform resampling
+    let output_channels = resampler
+        .process(&input_channels, None)
+        .map_err(|e| format!("Resampling failed: {}", e))?;
+
+    // Extract mono channel
+    let mut resampled = output_channels
+        .get(0)
+        .ok_or("No output channel from resampler")?
+        .clone();
+
+    // Ensure output length matches expected (pad or trim to match librosa's output)
+    // This is critical for matching Python's VAE token count
+    if resampled.len() < expected_len {
+        // Pad with zeros at the end
+        resampled.resize(expected_len, 0.0);
+    } else if resampled.len() > expected_len {
+        // Trim to expected length
+        resampled.truncate(expected_len);
+    }
+
+    Ok(resampled)
+}
+
+/// Initialize file-based logging for test binaries.
+///
+/// All tracing output will be written to `debug/logs/test_outputs/rust/{test_name}.log`.
+/// A single println! indicates the log file location to stdout.
+///
+/// # Arguments
+/// * `test_name` - Name of the test (used for log filename)
+/// * `enable_logging` - If false, logging is disabled entirely (no-op tracing subscriber)
+///
+/// # Returns
+/// Path to the log file (even if logging is disabled)
+pub fn init_file_logging(test_name: &str, enable_logging: bool) -> PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+    let log_dir = Path::new("debug/logs/test_outputs/rust");
+    std::fs::create_dir_all(log_dir).expect("Failed to create log directory");
+
+    // Get current timestamp
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
+    let log_path = log_dir.join(format!("{}_{}.log", test_name, timestamp));
+
+    if enable_logging {
+        let log_file = File::create(&log_path).expect("Failed to create log file");
+
+        // Use RUST_LOG env var if set, otherwise default to info
+        let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+
+        tracing_subscriber::registry()
+            .with(EnvFilter::new(&filter))
+            .with(fmt::layer().with_writer(log_file).with_ansi(false))
+            .init();
+    }
+
+    println!("📝 Log: {}", log_path.display());
+
+    log_path
+}
