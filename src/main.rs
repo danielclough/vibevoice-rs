@@ -1,5 +1,5 @@
 use anyhow::Result;
-use candle_core::Tensor;
+use candle_core::{DType, Tensor};
 use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -9,7 +9,7 @@ use vibevoice_rs::model::VibeVoiceModel;
 use vibevoice_rs::processor::VibeVoiceProcessor;
 use vibevoice_rs::utils::{
     create_remapped_varbuilder, download_model_files, get_device, init_file_logging,
-    save_audio_wav, set_all_seeds,
+    resolve_voice_path, save_audio_wav, set_all_seeds,
 };
 use vibevoice_rs::voice_mapper::{VoiceMapper, parse_txt_script};
 
@@ -132,11 +132,25 @@ fn main() -> Result<()> {
             .filter(|s| seen.insert(s.to_string()))
             .collect();
 
-        // Get voice files: prefer explicit --voices, fall back to VoiceMapper
-        let all_voices: Vec<PathBuf> = if let Some(voice_paths) = &args.voices {
+        // Get voice files: prefer explicit --voices or --voice, fall back to VoiceMapper
+        let script_dir = Path::new(script_path).parent();
+
+        // Collect explicit voice paths from either --voices or --voice
+        let explicit_voice_inputs: Option<Vec<String>> = if let Some(voice_paths) = &args.voices {
+            Some(voice_paths.clone())
+        } else if let Some(voice_path) = &args.voice {
+            Some(vec![voice_path.clone()])
+        } else {
+            None
+        };
+
+        let all_voices: Vec<PathBuf> = if let Some(voice_inputs) = explicit_voice_inputs {
             // Explicit voices provided via CLI - use in order
-            info!("🎤 Using {} explicit voice files:", voice_paths.len());
-            let voices: Vec<PathBuf> = voice_paths.iter().map(PathBuf::from).collect();
+            info!("🎤 Using {} explicit voice files:", voice_inputs.len());
+            let voices: Vec<PathBuf> = voice_inputs
+                .iter()
+                .map(|v| resolve_voice_path(v, script_dir))
+                .collect::<Result<Vec<_>>>()?;
 
             if voices.len() < unique_speakers.len() {
                 warn!(
@@ -176,10 +190,10 @@ fn main() -> Result<()> {
                 if demo_voices.exists() {
                     demo_voices
                 } else {
-                    PathBuf::from("./VibeVoice/demo/voices")
+                    PathBuf::from("./voices")
                 }
             } else {
-                PathBuf::from("./VibeVoice/demo/voices")
+                PathBuf::from("./voices")
             };
 
             info!("🎤 Scanning voices directory: {:?}", voices_dir);
@@ -221,9 +235,10 @@ fn main() -> Result<()> {
         info!("📝 Using text: {}", text_with_speaker);
 
         // Load single voice sample if provided
-        let voice_samples = if let Some(voice_path) = &args.voice {
-            info!("🎤 Using voice sample: {}", voice_path);
-            Some(vec![vec![PathBuf::from(voice_path)]])
+        let voice_samples = if let Some(voice_input) = &args.voice {
+            let resolved_path = resolve_voice_path(voice_input, None)?;
+            info!("🎤 Using voice sample: {:?}", resolved_path);
+            Some(vec![vec![resolved_path]])
         } else {
             None
         };
@@ -277,8 +292,8 @@ fn main() -> Result<()> {
         let total_samples = concatenated.dims().iter().product::<usize>();
         let audio_duration = total_samples as f32 / 24000.0;
 
-        // Audio stats at debug level
-        if let Ok(audio_vec) = concatenated.flatten_all()?.to_vec1::<f32>() {
+        // Audio stats at debug level (F16 compatibility)
+        if let Ok(audio_vec) = concatenated.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>() {
             let mean = audio_vec.iter().sum::<f32>() / audio_vec.len() as f32;
             let max = audio_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let min = audio_vec.iter().cloned().fold(f32::INFINITY, f32::min);

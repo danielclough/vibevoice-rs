@@ -15,6 +15,129 @@ use std::sync::Mutex;
 use std::{fs, path::Path};
 use tracing::{debug, error, info, warn};
 
+/// Resolve a voice path from user input.
+///
+/// Accepts:
+/// - Absolute path: used directly if it exists
+/// - Relative path: resolved from current directory if it exists
+/// - Voice name (with or without .wav): searched in:
+///   1. Script directory's `voices/` folder (if script_dir provided)
+///   2. `./voices/` folder (current working directory)
+///   3. Executable directory's `voices/` folder
+///
+/// Returns the resolved PathBuf or an error if the voice cannot be found.
+pub fn resolve_voice_path(voice_input: &str, script_dir: Option<&Path>) -> Result<PathBuf> {
+    let voice_path = Path::new(voice_input);
+
+    // 1. If it's an absolute path, use it directly
+    if voice_path.is_absolute() {
+        if voice_path.exists() {
+            debug!("Voice resolved as absolute path: {:?}", voice_path);
+            return Ok(voice_path.to_path_buf());
+        } else {
+            return Err(AnyErr::msg(format!(
+                "Voice file not found at absolute path: {}",
+                voice_input
+            )));
+        }
+    }
+
+    // 2. If it exists as a relative path from current directory, use it
+    if voice_path.exists() {
+        debug!("Voice resolved as relative path: {:?}", voice_path);
+        return Ok(voice_path.to_path_buf());
+    }
+
+    // 2b. Try relative to script directory and its parent (project root) if provided
+    if let Some(script_dir) = script_dir {
+        let relative_to_script = script_dir.join(voice_path);
+        if relative_to_script.exists() {
+            debug!(
+                "Voice resolved as path relative to script dir: {:?}",
+                relative_to_script
+            );
+            return Ok(relative_to_script);
+        }
+        // Also try relative to script's parent directory (common for project root)
+        if let Some(script_parent) = script_dir.parent() {
+            let relative_to_parent = script_parent.join(voice_path);
+            if relative_to_parent.exists() {
+                debug!(
+                    "Voice resolved as path relative to script parent dir: {:?}",
+                    relative_to_parent
+                );
+                return Ok(relative_to_parent);
+            }
+        }
+    }
+
+    // 2c. Try relative to executable directory
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let relative_to_exe = exe_dir.join(voice_path);
+            if relative_to_exe.exists() {
+                debug!(
+                    "Voice resolved as path relative to exe dir: {:?}",
+                    relative_to_exe
+                );
+                return Ok(relative_to_exe);
+            }
+        }
+    }
+
+    // 3. Treat as a voice name - search in voices directories
+    // Ensure we have a .wav extension for searching
+    let voice_name = if voice_input.ends_with(".wav") {
+        voice_input.to_string()
+    } else {
+        format!("{}.wav", voice_input)
+    };
+
+    // Build list of directories to search
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+
+    // 3a. Script directory's voices folder (highest priority)
+    if let Some(script_dir) = script_dir {
+        search_dirs.push(script_dir.join("voices"));
+        // Also check parent of script dir (e.g., project root)
+        if let Some(script_parent) = script_dir.parent() {
+            search_dirs.push(script_parent.join("voices"));
+        }
+    }
+
+    // 3b. Current working directory's voices folder
+    search_dirs.push(PathBuf::from("./voices"));
+
+    // 3c. Executable directory's voices folder
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            search_dirs.push(exe_dir.join("voices"));
+        }
+    }
+
+    // Search each directory
+    for dir in &search_dirs {
+        let candidate = dir.join(&voice_name);
+        if candidate.exists() {
+            debug!("Voice '{}' resolved to: {:?}", voice_input, candidate);
+            return Ok(candidate);
+        }
+    }
+
+    // Not found - provide helpful error message
+    let searched_locations: Vec<String> = search_dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect();
+
+    Err(AnyErr::msg(format!(
+        "Voice '{}' not found. Searched:\n  - As path: {}\n  - In directories: {}",
+        voice_input,
+        voice_input,
+        searched_locations.join(", ")
+    )))
+}
+
 /// Global CPU RNG state for deterministic random generation across all functions.
 /// Includes both the MT19937 generator AND the Box-Muller cache for PyTorch parity.
 ///
@@ -330,13 +453,7 @@ pub fn create_remapped_varbuilder<'a>(
     );
 
     // Use BF16 for GPU, F32 for CPU
-    let dtype = if device.is_cuda() {
-        DType::F16 // CUDA supports F16 for matmul
-    } else if device.is_metal() {
-        DType::F32 // Metal may not support BF16/F16 matmul, use F32
-    } else {
-        DType::F32 // CPU uses F32
-    };
+    let dtype = DType::F32;
 
     // Create VarBuilder from remapped tensors
     Ok(VarBuilder::from_tensors(all_tensors, dtype, device))
@@ -375,27 +492,9 @@ pub fn normalize_audio_db_fs(audio: &Tensor, target_db_fs: f32) -> Result<Tensor
     Ok(final_audio)
 }
 pub fn load_audio_wav(path: &str, target_sample_rate: u32) -> Result<Tensor> {
-    // Check for pre-resampled 24kHz version first (avoids resampling differences with Python)
-    let path_obj = std::path::Path::new(path);
-    let actual_path = if let Some(filename) = path_obj.file_name() {
-        let presampled_path = std::path::Path::new("voices_24k").join(filename);
-        if presampled_path.exists() && target_sample_rate == 24000 {
-            info!("  📁 Using pre-resampled 24kHz: {:?}", presampled_path);
-            presampled_path.to_string_lossy().to_string()
-        } else {
-            debug!(
-                "Pre-resampled not found at {:?}, using original: {}",
-                presampled_path, path
-            );
-            path.to_string()
-        }
-    } else {
-        path.to_string()
-    };
+    debug!("Loading audio from: {}", path);
 
-    debug!("Loading audio from: {}", actual_path);
-
-    let mut reader = hound::WavReader::open(&actual_path)
+    let mut reader = hound::WavReader::open(path)
         .map_err(|e| candle_core::Error::Msg(format!("Failed to open WAV: {}", e)))?;
 
     let spec = reader.spec();

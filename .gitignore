@@ -1,2 +1,15 @@
 # Build artifacts
 /target
+
+# Allowed
+!README.md
+!.gitignore
+!voices/*.wav
+
+# Debug outputs
+debug/
+
+# Temporary
+*.md
+.*
+*.wav

@@ -108,6 +108,8 @@ cargo run --release --features metal -- \
 
 ### Apple / Metal
 
+Very long inputs may run over the buffer.
+
 > Error: Metal error Failed to create metal resource: Buffer
 
 PyTorch MPS uses optimized SDPA (Scaled Dot Product Attention) that doesn't materialize the full attention matrix. Candle has flash attention but it's CUDA-only, not available for Metal.
