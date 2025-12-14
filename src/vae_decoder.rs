@@ -67,9 +67,19 @@ impl VAEStage {
         stage_id: &str,
     ) -> Result<Tensor> {
         let mut x = x.clone();
+        let log_rms = cache.tokens_processed() == 0; // Log for first token only
+
         for (i, block) in self.blocks.iter().enumerate() {
             let layer_id = format!("{}.block{}", stage_id, i);
             x = block.forward_with_cache(&x, cache, &layer_id)?;
+
+            // Log RMS after each block for first token
+            if log_rms {
+                let flat = x.flatten_all()?;
+                let vals: Vec<f32> = flat.to_vec1()?;
+                let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
+                info!("  📊 {}.block{}_rms: {:.6}", stage_id, i, rms);
+            }
         }
         Ok(x)
     }
@@ -278,9 +288,10 @@ impl VAEDecoder {
         x = self.head.forward(&x)?;
         debug!("  After head: {:?}", x.dims());
 
-        // Apply tanh activation (output in [-1, 1])
-        let audio = x.tanh()?;
-        debug!("  After tanh: {:?}", audio.dims());
+        // NOTE: Python VAE decoder does NOT apply tanh - return raw head output
+        // See modular_vibevoice_tokenizer.py:948-951 - forward() returns head(x) directly
+        let audio = x;
+        debug!("  Final audio: {:?}", audio.dims());
         debug!("🔍 =====================================\n");
 
         Ok(audio)
@@ -302,17 +313,17 @@ impl VAEDecoder {
             cache.in_warmup()
         );
 
+        // Log detailed RMS for first token only
+        let log_rms = cache.tokens_processed() == 0;
+
         // Debug: check input values
         let input_flat = x.flatten_all()?;
         let input_vals: Vec<f32> = input_flat.to_vec1()?;
         let input_rms =
             (input_vals.iter().map(|v| v * v).sum::<f32>() / input_vals.len() as f32).sqrt();
-        if cache.tokens_processed() < 3 {
-            info!(
-                "  🔍 DECODER INPUT RMS (token {}): {:.6}",
-                cache.tokens_processed(),
-                input_rms
-            );
+        if log_rms {
+            info!("📊 === RUST VAE DECODER LAYER-BY-LAYER RMS (token 0) ===");
+            info!("📊 input_rms: {:.6}", input_rms);
         }
 
         let mut x = x.clone();
@@ -324,19 +335,16 @@ impl VAEDecoder {
             x = self.upsample_layers[i].forward_with_cache(&x, cache, &upsample_id)?;
             debug!("  After upsample_layer[{}]: {:?}", i, x.dims());
 
-            // Debug: check RMS after first upsample
-            if i == 0 && cache.tokens_processed() < 3 {
+            // Log RMS after EVERY upsample layer for first token
+            if log_rms {
                 let flat = x.flatten_all()?;
                 let vals: Vec<f32> = flat.to_vec1()?;
                 let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
-                info!(
-                    "  🔍 AFTER STEM RMS (token {}): {:.6}",
-                    cache.tokens_processed(),
-                    rms
-                );
+                info!("📊 stage{}_upsample_rms: {:.6}", i, rms);
             }
 
             // Apply stage (Block1D modules) with cache
+            // Per-block RMS logging is handled inside VAEStage::forward_with_cache
             let stage_id = format!("stage_{}", i);
             x = self.stages[i].forward_with_cache(&x, cache, &stage_id)?;
             debug!("  After stage[{}]: {:?}", i, x.dims());
@@ -346,26 +354,31 @@ impl VAEDecoder {
         if let Some(ref norm) = self.norm {
             x = norm.forward(&x)?;
             debug!("  After norm: {:?}", x.dims());
+            if log_rms {
+                let flat = x.flatten_all()?;
+                let vals: Vec<f32> = flat.to_vec1()?;
+                let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
+                info!("📊 after_norm_rms: {:.6}", rms);
+            }
         }
 
         // Apply head convolution with cache
         x = self.head.forward_with_cache(&x, cache, "head")?;
         debug!("  After head: {:?}", x.dims());
 
-        // Apply tanh activation (output in [-1, 1])
-        let audio = x.tanh()?;
-        debug!("  After tanh: {:?}", audio.dims());
+        // NOTE: Python VAE decoder does NOT apply tanh - return raw head output
+        // See modular_vibevoice_tokenizer.py:948-951 - forward() returns head(x) directly
+        let audio = x;
+        debug!("  Final audio: {:?}", audio.dims());
 
-        // Debug: check output RMS for first few tokens
-        if cache.tokens_processed() < 3 {
+        // Log final RMS for first token
+        if log_rms {
             let flat = audio.flatten_all()?;
             let vals: Vec<f32> = flat.to_vec1()?;
             let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
-            info!(
-                "  🔍 FINAL AUDIO RMS (token {}): {:.6}",
-                cache.tokens_processed(),
-                rms
-            );
+            info!("📊 after_head_rms: {:.6}", rms);
+            info!("📊 final_rms: {:.6}", rms);
+            info!("📊 === END RUST VAE DECODER RMS ===");
         }
 
         // Increment token counter for next call

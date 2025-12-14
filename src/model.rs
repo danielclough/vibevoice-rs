@@ -709,17 +709,23 @@ impl VibeVoiceModel {
         };
 
         let init_vec = speech.flatten_all()?.to_vec1::<f32>()?;
+        let initial_rms = (init_vec.iter().map(|v| v.powi(2)).sum::<f32>() / init_vec.len() as f32).sqrt();
+        let cond_vec = condition.flatten_all()?.to_vec1::<f32>()?;
+        let cond_rms = (cond_vec.iter().map(|v| v.powi(2)).sum::<f32>() / cond_vec.len() as f32).sqrt();
         debug!(
             "🔍 Initial noise (doubled): shape=[{}, {}], mean={:.3}, std={:.3}",
             doubled_batch,
             latent_size,
             init_vec.iter().sum::<f32>() / init_vec.len() as f32,
-            (init_vec.iter().map(|v| v.powi(2)).sum::<f32>() / init_vec.len() as f32).sqrt()
+            initial_rms
         );
-        debug!(
-            "🔍 First 10 noise values: {:?}",
-            &init_vec[..10.min(init_vec.len())]
-        );
+
+        // Diffusion debugging: log initial state (matching Python format)
+        info!("[DIFF] cfg_scale={:.1}, steps={}", cfg_scale, num_steps);
+        info!("[DIFF] Initial noise RMS: {:.6}, condition RMS: {:.6}", initial_rms, cond_rms);
+        // DIAGNOSTIC: Log first 10 values for exact comparison with Python
+        info!("[DIFF] First 10 noise: {:?}", &init_vec[..10.min(init_vec.len())]);
+        info!("[DIFF] First 10 cond: {:?}", &cond_vec[..10.min(cond_vec.len())]);
 
         // === MULTISTEP SOLVER STATE ===
         // Python tracks model_outputs for 2nd-order solver
@@ -875,6 +881,15 @@ impl VibeVoiceModel {
                 / sample_vec.len() as f32)
                 .sqrt();
             debug!("     Updated sample (first half) std={:.3}", sample_std);
+
+            // Diffusion debugging: log each step (matching Python format)
+            let eps_vec = model_output.flatten_all()?.to_vec1::<f32>()?;
+            let eps_rms = (eps_vec.iter().map(|v| v.powi(2)).sum::<f32>() / eps_vec.len() as f32).sqrt();
+            let half_output_vec = half_output.flatten_all()?.to_vec1::<f32>()?;
+            let half_eps_rms = (half_output_vec.iter().map(|v| v.powi(2)).sum::<f32>() / half_output_vec.len() as f32).sqrt();
+            let speech_rms = sample_std; // Already computed as sample_std
+            info!("[DIFF Step {}] t={}, eps_rms={:.6}, half_eps_rms={:.6}, speech_rms={:.6}",
+                step_index, t, eps_rms, half_eps_rms, speech_rms);
         }
 
         // Return only the first half (matching Python's return speech[: len(speech) // 2])
@@ -895,6 +910,10 @@ impl VibeVoiceModel {
             final_mean, final_std
         );
         debug!("🔍 ==========================================\n");
+
+        // Diffusion debugging: log final output (matching Python format)
+        let final_rms = (final_vec.iter().map(|v| v.powi(2)).sum::<f32>() / final_vec.len() as f32).sqrt();
+        info!("[DIFF] Final output RMS: {:.6}", final_rms);
 
         Ok(result)
     }
@@ -992,7 +1011,7 @@ impl VibeVoiceModel {
             .filter(|(_, v)| v > &&f32::NEG_INFINITY) // Only show valid tokens
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         debug!("🔍 Top logits AFTER constraints (valid tokens only):");
         for (i, &(token_id, logit_val)) in indexed.iter().enumerate() {
@@ -1226,19 +1245,14 @@ impl VibeVoiceModel {
         let mut semantic_cache = crate::streaming_cache::StreamingCache::new(self.device.clone());
         let mut acoustic_cache = crate::streaming_cache::StreamingCache::new(self.device.clone());
 
-        // ✅ FIXED: Start with EMPTY cache (matching Python's DynamicCache behavior)
+        // Start with EMPTY cache (matching Python's DynamicCache behavior)
         // Python uses DynamicCache() which starts empty - NOT StaticCache with zeros!
         // When DynamicCache.update is first called, it just appends (no concatenation).
-        // Pre-allocating zeros caused attention to compute Q @ [zeros | current_K]^T without masking,
-        // which led to pathological attention weights and L2 explosion.
-        //
-        // Python flow (generation/utils.py:2018):
-        //   model_kwargs[cache_name] = DynamicCache()  # EMPTY, not pre-allocated
-        // Python flow (cache_utils.py:438-439):
-        //   self.key_cache.append(key_states)  # First update just appends
-        //
-        // Start with None cache (matching Python's empty DynamicCache behavior)
         let mut neg_cache_opt: Option<Vec<Option<(Tensor, Tensor)>>> = None;
+
+        // Will be set after the first SPEECH_DIFFUSION to store clean SPEECH_START K/V
+        // This is used to reset the negative cache for each new speaker
+        let mut initial_speech_start_kv: Option<Vec<Option<(Tensor, Tensor)>>> = None;
 
         // Track the absolute position in the negative sequence for cache_position-based masking
         let mut neg_cache_position: usize = 0;
@@ -1301,11 +1315,24 @@ impl VibeVoiceModel {
 
                 // Get base token embeddings and inject voice at marked positions
                 let base_embeds = self.get_token_embeddings(&current_input)?;
+
+                // DIAGNOSTIC: Log base embeddings RMS
+                let base_rms = base_embeds.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                info!("[DIAG Step0] Base embeddings RMS: {:.6}", base_rms);
+
+                // DIAGNOSTIC: Log voice embeddings RMS
+                let voice_rms = voice_embeds.unwrap().sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                info!("[DIAG Step0] Voice embeddings RMS: {:.6}", voice_rms);
+
                 let injected_embeds = self.inject_voice_embeddings(
                     &base_embeds,
                     voice_embeds.unwrap(),
                     speech_input_mask.unwrap(),
                 )?;
+
+                // DIAGNOSTIC: Log injected embeddings RMS
+                let injected_rms = injected_embeds.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                info!("[DIAG Step0] Injected embeddings RMS: {:.6}", injected_rms);
 
                 used_voice_embeds = true;
 
@@ -1326,6 +1353,12 @@ impl VibeVoiceModel {
                     "🔍 After LLM Forward: hidden_states shape={:?}",
                     pos_hidden_states.dims()
                 );
+                // DIAGNOSTIC: Log hidden states RMS at last position (becomes condition for 1st diffusion)
+                let hs_seq_len = pos_hidden_states.dim(1)?;
+                let last_hidden = pos_hidden_states.i((.., hs_seq_len - 1, ..))?;
+                let last_hidden_rms = last_hidden.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let all_hidden_rms = pos_hidden_states.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                info!("[DIAG Step0] LLM hidden states: all_rms={:.6}, last_pos_rms={:.6}", all_hidden_rms, last_hidden_rms);
             }
 
             // ✅ Save positive cache AFTER positive forward
@@ -1352,7 +1385,7 @@ impl VibeVoiceModel {
                 .enumerate()
                 .map(|(i, &v)| (i, v))
                 .collect();
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
             debug!("🔍 Top 5 logits BEFORE constraints:");
             for (i, &(token_id, logit_val)) in indexed.iter().take(5).enumerate() {
@@ -1428,6 +1461,16 @@ impl VibeVoiceModel {
 
                 // Pass both the 2D attention mask AND cache_position to enable proper 4D mask creation
                 // This allows selective attention (e.g., after SPEECH_START, only attend to reset position)
+                // DIAGNOSTIC: Log negative state before forward (for first token)
+                let token_num = audio_chunks.len() + 1;
+                if token_num <= 3 {
+                    info!("[DIAG NegFwd Token{}] Before: neg_seqlen_offset={}, neg_cache_pos={}, neg_input_len={}, mask_len={}",
+                        token_num, neg_seqlen_offset, neg_cache_position, neg_input_ids.dim(1)?, neg_attn_mask.dim(1)?);
+                    let mask_vec: Vec<u32> = neg_attn_mask.flatten_all()?.to_vec1()?;
+                    let ones_count = mask_vec.iter().filter(|&&x| x == 1).count();
+                    info!("[DIAG NegFwd Token{}] Mask ones: {}/{}", token_num, ones_count, mask_vec.len());
+                }
+
                 let neg_hidden_states = if let Some(neg_embeds) = neg_custom_embeds.take() {
                     self.llm.forward_from_embeds_with_cache_position(
                         &neg_embeds,
@@ -1444,6 +1487,15 @@ impl VibeVoiceModel {
                     )?
                 };
 
+                // DIAGNOSTIC: Log negative hidden states after forward (for first 3 tokens)
+                if token_num <= 3 {
+                    let neg_hs_seq_len = neg_hidden_states.dim(1)?;
+                    let neg_last_hidden = neg_hidden_states.i((.., neg_hs_seq_len - 1, ..))?;
+                    let neg_last_rms = neg_last_hidden.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                    info!("[DIAG NegFwd Token{}] After: neg_hidden_states shape={:?}, last_pos_rms={:.6}",
+                        token_num, neg_hidden_states.dims(), neg_last_rms);
+                }
+
                 // === MATCH PYTHON's _update_model_kwargs_for_generation ===
                 // Python updates all three immediately after forward:
                 // 1. past_key_values (KV cache)
@@ -1452,6 +1504,13 @@ impl VibeVoiceModel {
 
                 // 1. Save negative cache (past_key_values)
                 neg_cache_opt = Some(self.llm.extract_kv_cache());
+
+                // Store initial K/V after first SPEECH_DIFFUSION for later speaker resets
+                // This captures the clean SPEECH_START context before any contamination
+                if initial_speech_start_kv.is_none() {
+                    initial_speech_start_kv = neg_cache_opt.clone();
+                    debug!("📌 Stored initial SPEECH_START K/V for speaker resets");
+                }
 
                 // 2. Update attention_mask - append 1 (Python line 903-905)
                 let neg_mask_tensor = Tensor::ones((1, 1), candle_core::DType::U32, &self.device)?;
@@ -1475,12 +1534,27 @@ impl VibeVoiceModel {
                 self.llm.restore_kv_cache(pos_cache.clone());
 
                 // Now extract conditions for diffusion
-                let condition = pos_hidden_states.i((.., seq_len - 1, ..))?;
+                // BUG FIX: Use pos_hidden_states.dim(1), NOT seq_len (which is from logits = 1)
+                let pos_seq_len = pos_hidden_states.dim(1)?;
+                let condition = pos_hidden_states.i((.., pos_seq_len - 1, ..))?;
                 let neg_seq_len = neg_hidden_states.dim(1)?;
                 let neg_condition = neg_hidden_states.i((.., neg_seq_len - 1, ..))?;
 
+                // Diagnostic logging: Track CFG condition quality per token
+                // Consistent RMS values across tokens indicate proper negative condition handling
+                let pos_cond_rms = condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let neg_cond_rms = neg_condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                tracing::info!(
+                    "[CFG] Token {}: pos_condition RMS={:.6}, neg_condition RMS={:.6}",
+                    audio_chunks.len() + 1,
+                    pos_cond_rms,
+                    neg_cond_rms
+                );
+
                 // Step 1: Sample acoustic latent from diffusion
-                let num_steps = self.config.diffusion_head_config.ddpm_num_inference_steps;
+                // BUGFIX: Use solver.num_steps which is set by set_ddpm_inference_steps(),
+                // not the config value which is never updated
+                let num_steps = self.solver.num_steps;
                 let acoustic_latent =
                     self.sample_dpm_solver(&condition, &neg_condition, num_steps, self.cfg_scale)?;
                 debug!("  Generated acoustic latent: {:?}", acoustic_latent.dims());
@@ -1596,14 +1670,25 @@ impl VibeVoiceModel {
                 mask_data[mask_len - 1] = 1;
                 neg_attn_mask = Tensor::new(mask_data.as_slice(), &self.device)?.unsqueeze(0)?;
 
-                // Shift KV cache: copy position 0 to last position (Python lines 612-618)
-                // This puts the original SPEECH_START K/V at the position where attention mask = 1
-                // Note: neg_cache_opt is always Some (initialized before generation loop)
-                if let Some(ref mut neg_cache) = neg_cache_opt {
+                // FIX: Copy position 0 to last position in CURRENT neg cache
+                // This matches Python's approach (lines 612-618 in modeling_vibevoice_inference.py):
+                //   k_cache[sample_idx, :, -1, :] = k_cache[sample_idx, :, 0, :].clone()
+                //   v_cache[sample_idx, :, -1, :] = v_cache[sample_idx, :, 0, :].clone()
+                //
+                // IMPORTANT: Python operates on the CURRENT cache (keeping full length),
+                // NOT restoring from an initial cache. The previous implementation restored
+                // from initial_speech_start_kv which had only 1-2 positions, causing a mismatch
+                // with the 17-position attention mask.
+                //
+                // The key insight: Position 0 in the current neg cache still contains the
+                // original SPEECH_START context because we never modified it - we only
+                // appended new positions. So copying pos 0 to pos -1 achieves the same
+                // result as Python without needing to save/restore the initial cache.
+                if let Some(ref cache) = neg_cache_opt {
                     let temp_pos_cache = self.llm.extract_kv_cache();
-                    self.llm.restore_kv_cache(neg_cache.clone());
+                    self.llm.restore_kv_cache(cache.clone());
                     self.llm.shift_kv_cache_first_to_last()?;
-                    *neg_cache = self.llm.extract_kv_cache();
+                    neg_cache_opt = Some(self.llm.extract_kv_cache());
                     self.llm.restore_kv_cache(temp_pos_cache);
                 }
 
