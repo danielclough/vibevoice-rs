@@ -57,35 +57,35 @@ pub fn pad1d(x: &Tensor, paddings: (usize, usize), mode: &str, value: f64) -> Re
         let padded_length = x.dim(D::Minus1)?;
         let mut parts = Vec::new();
 
-        // Left padding (reflect)
+        // Left padding (reflect) - contiguous for CUDA compatibility
         if padding_left > 0 {
-            let left_slice = x.narrow(D::Minus1, 1, padding_left)?;
+            let left_slice = x.narrow(D::Minus1, 1, padding_left)?.contiguous()?;
             let indices: Vec<u32> = (0..padding_left).rev().map(|i| i as u32).collect();
             let indices_tensor = Tensor::from_vec(indices, (padding_left,), x.device())?;
-            let left_pad = left_slice.index_select(&indices_tensor, last_dim)?;
+            let left_pad = left_slice.index_select(&indices_tensor, last_dim)?.contiguous()?;
             parts.push(left_pad);
         }
 
         // Original data
         parts.push(x.clone());
 
-        // Right padding (reflect)
+        // Right padding (reflect) - contiguous for CUDA compatibility
         if padding_right > 0 {
             let start = padded_length - padding_right - 1;
-            let right_slice = x.narrow(D::Minus1, start, padding_right)?;
+            let right_slice = x.narrow(D::Minus1, start, padding_right)?.contiguous()?;
             let indices: Vec<u32> = (0..padding_right).rev().map(|i| i as u32).collect();
             let indices_tensor = Tensor::from_vec(indices, (padding_right,), x.device())?;
-            let right_pad = right_slice.index_select(&indices_tensor, last_dim)?;
+            let right_pad = right_slice.index_select(&indices_tensor, last_dim)?.contiguous()?;
             parts.push(right_pad);
         }
 
-        // Concatenate all parts
-        let padded = Tensor::cat(&parts, D::Minus1)?;
+        // Concatenate all parts and ensure contiguous memory layout for CUDA
+        let padded = Tensor::cat(&parts, D::Minus1)?.contiguous()?;
 
-        // Remove the extra zero padding we added
+        // Remove the extra zero padding we added (contiguous for CUDA)
         if extra_pad > 0 {
             let end = padded.dim(D::Minus1)? - extra_pad;
-            Ok(padded.narrow(D::Minus1, 0, end)?)
+            Ok(padded.narrow(D::Minus1, 0, end)?.contiguous()?)
         } else {
             Ok(padded)
         }
@@ -159,8 +159,8 @@ impl ConvRMSNorm {
         // Convert back to original dtype
         let normed = normed.to_dtype(x.dtype())?;
 
-        // Transpose back: b t c -> b c t
-        Ok(normed.transpose(1, 2)?)
+        // Transpose back: b t c -> b c t (contiguous for CUDA compatibility)
+        Ok(normed.transpose(1, 2)?.contiguous()?)
     }
 }
 
@@ -311,21 +311,25 @@ impl SConv1d {
                 "[CACHE {}] Initializing cache with zeros: [{}x{}x{}]",
                 layer_id, dims[0], dims[1], self.context_size
             );
-            Tensor::zeros(
+            let zeros = Tensor::zeros(
                 &[dims[0], dims[1], self.context_size],
                 x.dtype(),
                 x.device(),
-            )?
+            )?;
+            x.device().synchronize()?;
+            zeros
         } else {
             // No context needed (kernel_size == stride)
             let dims = x.dims();
             debug!("[CACHE {}] No context needed", layer_id);
-            Tensor::zeros(&[dims[0], dims[1], 0], x.dtype(), x.device())?
+            let zeros = Tensor::zeros(&[dims[0], dims[1], 0], x.dtype(), x.device())?;
+            x.device().synchronize()?;
+            zeros
         };
 
         // Concatenate cached context with new input
         let input_with_context = if cached_states.dim(D::Minus1)? > 0 {
-            let combined = Tensor::cat(&[&cached_states, x], D::Minus1)?;
+            let combined = Tensor::cat(&[&cached_states, x], D::Minus1)?.contiguous()?;
             debug!(
                 "[CACHE {}] Combined: cache {:?} + input {:?} = {:?}",
                 layer_id,
@@ -469,7 +473,9 @@ impl SConvTranspose1d {
                 "[CACHE {}] Initialized empty cache for transposed conv",
                 layer_id
             );
-            Tensor::zeros(&[dims[0], dims[1], 0], x.dtype(), x.device())?
+            let zeros = Tensor::zeros(&[dims[0], dims[1], 0], x.dtype(), x.device())?;
+            x.device().synchronize()?;
+            zeros
         };
 
         // FIXED: Check cache SHAPE, not existence (matching Python line 522)
@@ -477,9 +483,9 @@ impl SConvTranspose1d {
         // An empty cache (shape [B,C,0]) should be treated as "first chunk"
         let is_first_chunk = cached_input.dim(D::Minus1)? == 0;
 
-        // Concatenate cached input with new input
+        // Concatenate cached input with new input (contiguous for CUDA compatibility)
         let full_input = if cached_input.dim(D::Minus1)? > 0 {
-            Tensor::cat(&[&cached_input, x], D::Minus1)?
+            Tensor::cat(&[&cached_input, x], D::Minus1)?.contiguous()?
         } else {
             x.clone()
         };
@@ -693,12 +699,12 @@ impl Block1D {
         let residual_ffn = x.clone(); // Save post-mixer result for FFN residual connection
         x = self.ffn_norm.forward(&residual_ffn)?;
 
-        // Permute: b c t -> b t c for FFN
-        x = x.transpose(1, 2)?;
+        // Permute: b c t -> b t c for FFN (contiguous for CUDA compatibility)
+        x = x.transpose(1, 2)?.contiguous()?;
         x = self.ffn.forward(&x)?;
 
-        // Permute back: b t c -> b c t
-        x = x.transpose(1, 2)?;
+        // Permute back: b t c -> b c t (contiguous for CUDA compatibility)
+        x = x.transpose(1, 2)?.contiguous()?;
 
         // Apply ffn_gamma scaling if present
         if let Some(ref ffn_gamma) = self.ffn_gamma {
@@ -721,43 +727,10 @@ impl Block1D {
         cache: &mut crate::streaming_cache::StreamingCache,
         layer_id: &str,
     ) -> Result<Tensor> {
-        // Debug: log input RMS for first few tokens
-        let input_rms = if cache.tokens_processed() < 2 {
-            let flat = x.flatten_all()?;
-            let vals: Vec<f32> = flat.to_vec1()?;
-            let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
-            Some(rms)
-        } else {
-            None
-        };
-
         // Mixer path with cache (only mixer needs caching)
         let residual = x;
         let mut x = self.norm.forward(x)?;
         x = self.mixer.forward_with_cache(&x, cache, layer_id)?;
-
-        // Debug: log output RMS after mixer and gamma value
-        if let Some(in_rms) = input_rms {
-            let flat = x.flatten_all()?;
-            let vals: Vec<f32> = flat.to_vec1()?;
-            let out_rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
-            let gamma_val = if let Some(ref gamma) = self.gamma {
-                let g: Vec<f32> = gamma.flatten_all()?.to_vec1()?;
-                g.iter().sum::<f32>() / g.len() as f32
-            } else {
-                1.0
-            };
-            if layer_id.contains("stage_0.block0") && cache.tokens_processed() < 2 {
-                info!(
-                    "  🔍 Block1D [{}] token {}: in={:.4}, mixer_out={:.4}, gamma_mean={:.4}",
-                    layer_id,
-                    cache.tokens_processed(),
-                    in_rms,
-                    out_rms,
-                    gamma_val
-                );
-            }
-        }
 
         // Apply gamma scaling if present
         if let Some(ref gamma) = self.gamma {
@@ -776,12 +749,12 @@ impl Block1D {
         let residual_ffn = x.clone();
         x = self.ffn_norm.forward(&residual_ffn)?;
 
-        // Permute: b c t -> b t c for FFN
-        x = x.transpose(1, 2)?;
+        // Permute: b c t -> b t c for FFN (contiguous for CUDA compatibility)
+        x = x.transpose(1, 2)?.contiguous()?;
         x = self.ffn.forward(&x)?;
 
-        // Permute back: b t c -> b c t
-        x = x.transpose(1, 2)?;
+        // Permute back: b t c -> b c t (contiguous for CUDA compatibility)
+        x = x.transpose(1, 2)?.contiguous()?;
 
         // Apply ffn_gamma scaling if present
         if let Some(ref ffn_gamma) = self.ffn_gamma {

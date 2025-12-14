@@ -246,21 +246,16 @@ impl VAEEncoder {
         debug!("\n🔍 === VAE ENCODE ===");
         debug!("  Input audio shape: {:?}", audio.dims());
 
-        let mut x = audio.clone();
+        // Process first stage using audio directly (avoids clone)
+        let mut x = self.downsample_layers[0].forward(audio)?;
+        debug!("  After downsample_0 (stem): {:?}", x.dims());
+        x = self.stages[0].forward(&x)?;
+        debug!("  After stage_0: {:?}", x.dims());
 
-        // Apply downsample layers and stages dynamically
-        for stage_idx in 0..self.stages.len() {
-            // Apply downsample layer (except for the first stage which doesn't have a downsample before it)
-            if stage_idx > 0 {
-                x = self.downsample_layers[stage_idx].forward(&x)?;
-                debug!("  After downsample_{}: {:?}", stage_idx, x.dims());
-            } else {
-                // First downsample (stem) - applied to input
-                x = self.downsample_layers[0].forward(&x)?;
-                debug!("  After downsample_0 (stem): {:?}", x.dims());
-            }
-
-            // Apply stage blocks
+        // Process remaining stages
+        for stage_idx in 1..self.stages.len() {
+            x = self.downsample_layers[stage_idx].forward(&x)?;
+            debug!("  After downsample_{}: {:?}", stage_idx, x.dims());
             x = self.stages[stage_idx].forward(&x)?;
             debug!("  After stage_{}: {:?}", stage_idx, x.dims());
         }
@@ -290,20 +285,17 @@ impl VAEEncoder {
         audio: &Tensor,
         cache: &mut crate::streaming_cache::StreamingCache,
     ) -> Result<Tensor> {
-        let mut x = audio.clone();
+        // Process first stage using audio directly (avoids clone)
+        let layer_id_0 = "downsample_layers.0.0";
+        let mut x = self.downsample_layers[0].forward_with_cache(audio, cache, layer_id_0)?;
+        let stage_id_0 = "stage_0";
+        x = self.stages[0].forward_with_cache(&x, cache, stage_id_0)?;
 
-        // Apply downsample layers and stages WITH CACHE
-        // Each downsample layer gets a unique cache ID
-        for stage_idx in 0..self.stages.len() {
-            // Apply downsample layer with cache
+        // Process remaining stages WITH CACHE
+        for stage_idx in 1..self.stages.len() {
             let layer_id = format!("downsample_layers.{}.0", stage_idx);
-            if stage_idx > 0 {
-                x = self.downsample_layers[stage_idx].forward_with_cache(&x, cache, &layer_id)?;
-            } else {
-                x = self.downsample_layers[0].forward_with_cache(&x, cache, &layer_id)?;
-            }
+            x = self.downsample_layers[stage_idx].forward_with_cache(&x, cache, &layer_id)?;
 
-            // Apply stage blocks with cache
             let stage_id = format!("stage_{}", stage_idx);
             x = self.stages[stage_idx].forward_with_cache(&x, cache, &stage_id)?;
         }

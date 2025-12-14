@@ -569,6 +569,7 @@ impl VibeVoiceProcessor {
                     let pad_size = max_samples - current_samples;
                     let padding =
                         Tensor::zeros((1, pad_size), squeezed.dtype(), squeezed.device())?;
+                    squeezed.device().synchronize()?;
                     Tensor::cat(&[&squeezed, &padding], 1)?
                 } else {
                     squeezed

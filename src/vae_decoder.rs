@@ -17,8 +17,7 @@ pub struct VAEStage {
 impl VAEStage {
     pub fn new(
         vb: VarBuilder,
-        #[allow(unused_variables)]
-        stage_idx: usize,
+        #[allow(unused_variables)] stage_idx: usize,
         dim: usize,
         num_blocks: usize,
         kernel_size: usize,
@@ -313,19 +312,6 @@ impl VAEDecoder {
             cache.in_warmup()
         );
 
-        // Log detailed RMS for first token only
-        let log_rms = cache.tokens_processed() == 0;
-
-        // Debug: check input values
-        let input_flat = x.flatten_all()?;
-        let input_vals: Vec<f32> = input_flat.to_vec1()?;
-        let input_rms =
-            (input_vals.iter().map(|v| v * v).sum::<f32>() / input_vals.len() as f32).sqrt();
-        if log_rms {
-            info!("📊 === RUST VAE DECODER LAYER-BY-LAYER RMS (token 0) ===");
-            info!("📊 input_rms: {:.6}", input_rms);
-        }
-
         let mut x = x.clone();
 
         // Forward features with streaming cache
@@ -334,14 +320,6 @@ impl VAEDecoder {
             let upsample_id = format!("upsample_{}", i);
             x = self.upsample_layers[i].forward_with_cache(&x, cache, &upsample_id)?;
             debug!("  After upsample_layer[{}]: {:?}", i, x.dims());
-
-            // Log RMS after EVERY upsample layer for first token
-            if log_rms {
-                let flat = x.flatten_all()?;
-                let vals: Vec<f32> = flat.to_vec1()?;
-                let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
-                info!("📊 stage{}_upsample_rms: {:.6}", i, rms);
-            }
 
             // Apply stage (Block1D modules) with cache
             // Per-block RMS logging is handled inside VAEStage::forward_with_cache
@@ -354,12 +332,6 @@ impl VAEDecoder {
         if let Some(ref norm) = self.norm {
             x = norm.forward(&x)?;
             debug!("  After norm: {:?}", x.dims());
-            if log_rms {
-                let flat = x.flatten_all()?;
-                let vals: Vec<f32> = flat.to_vec1()?;
-                let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
-                info!("📊 after_norm_rms: {:.6}", rms);
-            }
         }
 
         // Apply head convolution with cache
@@ -370,16 +342,6 @@ impl VAEDecoder {
         // See modular_vibevoice_tokenizer.py:948-951 - forward() returns head(x) directly
         let audio = x;
         debug!("  Final audio: {:?}", audio.dims());
-
-        // Log final RMS for first token
-        if log_rms {
-            let flat = audio.flatten_all()?;
-            let vals: Vec<f32> = flat.to_vec1()?;
-            let rms = (vals.iter().map(|v| v * v).sum::<f32>() / vals.len() as f32).sqrt();
-            info!("📊 after_head_rms: {:.6}", rms);
-            info!("📊 final_rms: {:.6}", rms);
-            info!("📊 === END RUST VAE DECODER RMS ===");
-        }
 
         // Increment token counter for next call
         cache.increment_token_count();

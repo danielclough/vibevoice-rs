@@ -2,6 +2,12 @@
 name = "vibevoice-rs"
 version = "0.1.0"
 edition = "2024"
+description = "High-quality text-to-speech with voice cloning and multi-speaker synthesis"
+license = "MIT"
+repository = "https://github.com/danielclough/vibevoice-rs"
+readme = "README.md"
+keywords = ["tts", "text-to-speech", "voice-cloning", "speech-synthesis", "ml"]
+categories = ["multimedia::audio", "science"]
 
 [dependencies]
 # Error handling

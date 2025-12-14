@@ -452,7 +452,7 @@ pub fn create_remapped_varbuilder<'a>(
         decoder_weights_found.len()
     );
 
-    // Use BF16 for GPU, F32 for CPU
+    // Use F32 for now
     let dtype = DType::F32;
 
     // Create VarBuilder from remapped tensors

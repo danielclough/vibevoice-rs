@@ -66,6 +66,7 @@ impl StreamingCache {
     pub fn reset_to_zero(&mut self) {
         for (_key, tensor) in self.cache.iter_mut() {
             if let Ok(zeros) = Tensor::zeros(tensor.dims(), tensor.dtype(), tensor.device()) {
+                let _ = tensor.device().synchronize();
                 *tensor = zeros;
             }
         }

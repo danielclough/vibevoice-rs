@@ -32,8 +32,8 @@ pub struct VibeVoiceModel {
     pub vae_decoder: VAEDecoder,
     tokenizer: Tokenizer,
     solver: DPMSolverPP,
-    pub speech_scaling_factor: Tensor,
-    pub speech_bias_factor: Tensor,
+    pub speech_scaling_factor: f32,
+    pub speech_bias_factor: f32,
     cfg_scale: f32,
     // Special token IDs loaded from tokenizer
     speech_start_id: u32,
@@ -241,13 +241,13 @@ impl VibeVoiceModel {
             speech_bias_tensor.to_vec1::<f32>()?[0]
         };
 
-        // Create scalar tensors (rank 0) for later use
-        let speech_scaling_factor = Tensor::from_vec(vec![scale_val], &[], &device)?;
-        let speech_bias_factor = Tensor::from_vec(vec![bias_val], &[], &device)?;
+        // Store as f32 directly to avoid repeated GPU-CPU transfers
+        let speech_scaling_factor = scale_val;
+        let speech_bias_factor = bias_val;
 
         debug!(
             "📊 Speech normalization: scaling={:.6}, bias={:.6}",
-            scale_val, bias_val
+            speech_scaling_factor, speech_bias_factor
         );
 
         // Default CFG scale - Python implementation uses 1.3
@@ -373,39 +373,25 @@ impl VibeVoiceModel {
         // Note: lm_head is for output projection, embed_tokens is for input embeddings
         let embed_weight = &self.embed_tokens;
 
-        // Manual embedding lookup: index into weight matrix
+        // GPU-side embedding lookup using index_select
         // embed_weight: [vocab_size, hidden_size]
         // input_ids: [batch, seq_len]
         // Result: [batch, seq_len, hidden_size]
 
-        let input_ids_vec = input_ids.to_vec2::<u32>()?;
-        let (vocab_size, hidden_size) = embed_weight.dims2()?;
-        let batch_size = input_ids_vec.len();
-        let seq_len = input_ids_vec[0].len();
+        let (batch_size, seq_len) = input_ids.dims2()?;
+        let (_, hidden_size) = embed_weight.dims2()?;
 
-        // Convert weight to vec for indexing
-        let weight_vec = embed_weight.to_vec2::<f32>()?;
+        // Flatten input_ids to 1D for index_select: [batch * seq_len]
+        let flat_ids = input_ids.flatten_all()?;
 
-        // Build embeddings by indexing
-        let mut embeds = Vec::with_capacity(batch_size * seq_len * hidden_size);
-        for batch in &input_ids_vec {
-            for &token_id in batch {
-                let idx = token_id as usize;
-                if idx >= vocab_size {
-                    return Err(AnyErr::msg(format!(
-                        "Token ID {} out of range (vocab size: {})",
-                        idx, vocab_size
-                    )));
-                }
-                embeds.extend_from_slice(&weight_vec[idx]);
-            }
-        }
+        // Convert to i64 for index_select (Candle requires i64 indices)
+        let flat_ids_i64 = flat_ids.to_dtype(candle_core::DType::I64)?;
 
-        Ok(Tensor::from_vec(
-            embeds,
-            (batch_size, seq_len, hidden_size),
-            embed_weight.device(),
-        )?)
+        // Use index_select to gather embeddings on GPU: [batch * seq_len, hidden_size]
+        let flat_embeds = embed_weight.index_select(&flat_ids_i64, 0)?;
+
+        // Reshape to [batch, seq_len, hidden_size]
+        Ok(flat_embeds.reshape((batch_size, seq_len, hidden_size))?)
     }
 
     /// Convert voice audio to embeddings ready for injection into LLM
@@ -437,7 +423,8 @@ impl VibeVoiceModel {
 
         // Step 2: Permute to [num_speakers, vae_tokens, 64] (matching Python encoder output)
         // This must happen BEFORE sampling and bias/scale to match Python's flow
-        let latents_permuted = latents.transpose(1, 2)?;
+        // (contiguous for CUDA compatibility)
+        let latents_permuted = latents.transpose(1, 2)?.contiguous()?;
         debug!("  Permuted shape: {:?}", latents_permuted.dims());
 
         // Step 3: Gaussian sampling (matching Python's std_dist_type='gaussian')
@@ -471,9 +458,7 @@ impl VibeVoiceModel {
         debug!("  Sampled latents shape: {:?}", latents_sampled.dims());
 
         // Step 4: Apply normalization (same as Python: (latents + bias) * scale)
-        let scale_val = self.speech_scaling_factor.to_scalar::<f32>()?;
-        let bias_val = self.speech_bias_factor.to_scalar::<f32>()?;
-        let normalized = ((latents_sampled + bias_val as f64)? * scale_val as f64)?;
+        let normalized = ((latents_sampled + self.speech_bias_factor as f64)? * self.speech_scaling_factor as f64)?;
         debug!("  Normalized latents shape: {:?}", normalized.dims());
 
         // Step 5: Project through acoustic connector to LLM hidden space
@@ -483,37 +468,54 @@ impl VibeVoiceModel {
 
         // Step 6: Apply speech_masks to filter padded tokens and flatten
         // This matches Python's: acoustic_connected[speech_masks.cpu()]
+        // GPU-side implementation using index_select to avoid large GPU->CPU transfers
         if let Some(masks) = speech_masks {
-            let voice_vec = voice_embeds.to_vec3::<f32>()?;
-            let hidden_size = voice_embeds.dim(2)?;
+            let (num_speakers, vae_tokens, hidden_size) = voice_embeds.dims3()?;
 
-            // Flatten and filter: collect only valid tokens from all speakers
-            let mut flat_embeds: Vec<f32> = Vec::new();
-            let mut total_valid_tokens = 0;
-
+            // Step 6a: Compute flat indices on CPU (masks are already Vec<Vec<bool>>)
+            // This is a small operation - just iterating over booleans
+            let mut flat_indices: Vec<i64> = Vec::new();
             for (speaker_idx, mask) in masks.iter().enumerate() {
                 for (tok_idx, &is_valid) in mask.iter().enumerate() {
-                    if is_valid && tok_idx < voice_vec[speaker_idx].len() {
-                        flat_embeds.extend_from_slice(&voice_vec[speaker_idx][tok_idx]);
-                        total_valid_tokens += 1;
+                    if is_valid && tok_idx < vae_tokens {
+                        // Compute flat index: speaker_idx * vae_tokens + tok_idx
+                        flat_indices.push((speaker_idx * vae_tokens + tok_idx) as i64);
                     }
                 }
             }
+            let total_valid_tokens = flat_indices.len();
+
+            if total_valid_tokens == 0 {
+                debug!("  Warning: No valid tokens after mask filtering");
+                return Ok(Tensor::zeros(
+                    (0, hidden_size),
+                    voice_embeds.dtype(),
+                    audio.device(),
+                )?);
+            }
+
+            // Step 6b: Flatten voice_embeds on GPU: [num_speakers, vae_tokens, hidden_size] -> [num_speakers * vae_tokens, hidden_size]
+            let flat_voice = voice_embeds.reshape((num_speakers * vae_tokens, hidden_size))?;
+
+            // Step 6c: Create indices tensor on GPU (small transfer - just total_valid_tokens i64 values)
+            let indices_tensor =
+                Tensor::from_vec(flat_indices, (total_valid_tokens,), audio.device())?;
+
+            // Step 6d: Use index_select to gather valid rows on GPU
+            // flat_voice: [num_speakers * vae_tokens, hidden_size]
+            // indices: [total_valid_tokens]
+            // result: [total_valid_tokens, hidden_size]
+            let result = flat_voice.index_select(&indices_tensor, 0)?;
 
             debug!(
-                "  Filtered with speech_masks: {} valid tokens from {} speakers -> [{}, {}]",
+                "  Filtered with speech_masks (GPU-side): {} valid tokens from {} speakers -> [{}, {}]",
                 total_valid_tokens,
                 masks.len(),
                 total_valid_tokens,
                 hidden_size
             );
 
-            // Return flattened 2D tensor [total_valid_tokens, hidden_size]
-            Ok(Tensor::from_vec(
-                flat_embeds,
-                (total_valid_tokens, hidden_size),
-                audio.device(),
-            )?)
+            Ok(result)
         } else {
             // Single speaker case: squeeze batch dim to get [num_tokens, hidden_size]
             let squeezed = voice_embeds.squeeze(0)?;
@@ -540,10 +542,10 @@ impl VibeVoiceModel {
         voice_embeds: &Tensor,
         injection_mask: &Tensor,
     ) -> Result<Tensor> {
-        let (batch_size, seq_len, hidden_size) = base_embeds.dims3()?;
+        let (batch_size, seq_len, _hidden_size) = base_embeds.dims3()?;
 
         debug!(
-            "💉 Injecting voice embeddings: base={:?}, voice={:?}, mask={:?}",
+            "💉 Injecting voice embeddings (GPU-side): base={:?}, voice={:?}, mask={:?}",
             base_embeds.dims(),
             voice_embeds.dims(),
             injection_mask.dims()
@@ -556,67 +558,111 @@ impl VibeVoiceModel {
             injection_mask.clone()
         };
 
-        // Convert to CPU for easier manipulation
-        // base_embeds: [batch, seq_len, hidden_size]
-        let base_vec = base_embeds.to_vec3::<f32>()?;
+        // Step 1: Only move the small mask to CPU (seq_len u8 values)
         let mask_vec = mask_1d.to_vec1::<u8>()?;
 
-        // Handle both 2D [total_tokens, hidden] and 3D [batch, tokens, hidden] voice_embeds
-        // After our fix, voice_embeds should always be 2D [total_valid_tokens, hidden_size]
-        let voice_vec_2d: Vec<Vec<f32>> = if voice_embeds.dims().len() == 2 {
-            voice_embeds.to_vec2::<f32>()?
+        // Handle both 2D and 3D voice_embeds (for backward compatibility)
+        let voice_2d = if voice_embeds.dims().len() == 3 {
+            // Legacy 3D format: squeeze first batch dim
+            voice_embeds.squeeze(0)?
         } else {
-            // Legacy 3D format: flatten to 2D by taking first batch and all tokens
-            // This handles backward compatibility with old code paths
-            let vec_3d = voice_embeds.to_vec3::<f32>()?;
-            vec_3d[0].clone()
+            voice_embeds.clone()
         };
+        let num_voice_tokens = voice_2d.dim(0)?;
 
-        // Create new embeddings array (clone base)
-        let mut result = base_vec.clone();
-
-        // Inject voice embeddings at marked positions
-        // Simple 1-to-1 assignment: for each marked position, take next embedding from voice_vec_2d
-        let mut voice_idx = 0;
-        let total_voice_tokens = voice_vec_2d.len();
-        let marked_positions: usize = mask_vec.iter().map(|&v| v as usize).sum();
+        // Step 2: Compute selection indices on CPU
+        // For each position in seq_len:
+        //   - If mask=0: select from base_embeds at that position
+        //   - If mask=1: select from voice_embeds (next voice token)
+        //
+        // We'll concatenate [base_2d, voice_embeds] and build selection indices
+        // into this combined tensor.
+        let mut selection_indices: Vec<i64> = Vec::with_capacity(seq_len);
+        let mut voice_idx: usize = 0;
+        let mut marked_count: usize = 0;
 
         for pos in 0..seq_len {
-            if mask_vec[pos] == 1 && voice_idx < total_voice_tokens {
-                // Inject the same voice embedding for all batch items (typically batch=1)
-                for b in 0..batch_size {
-                    result[b][pos] = voice_vec_2d[voice_idx].clone();
+            if mask_vec[pos] == 1 {
+                marked_count += 1;
+                if voice_idx < num_voice_tokens {
+                    // Select from voice: index = seq_len + voice_idx
+                    selection_indices.push((seq_len + voice_idx) as i64);
+                    voice_idx += 1;
+                } else {
+                    // More mask positions than voice tokens: keep base embedding
+                    debug!(
+                        "  Warning: mask position {} has no voice token (exhausted {} tokens)",
+                        pos, num_voice_tokens
+                    );
+                    selection_indices.push(pos as i64);
                 }
-                voice_idx += 1;
+            } else {
+                // Select from base: index = pos
+                selection_indices.push(pos as i64);
             }
         }
 
         debug!(
-            "  Injected {} voice tokens into {} marked positions",
-            voice_idx, marked_positions
+            "  Prepared {} selection indices: {} from base, {} from voice",
+            seq_len,
+            seq_len - voice_idx.min(marked_count),
+            voice_idx
         );
 
-        if voice_idx != marked_positions {
+        if voice_idx != marked_count && voice_idx < num_voice_tokens {
             tracing::warn!(
-                "⚠️ Voice token count mismatch: {} voice tokens vs {} marked positions",
-                total_voice_tokens,
-                marked_positions
+                "⚠️ Voice token count mismatch: {} voice tokens used vs {} marked positions (had {} voice tokens)",
+                voice_idx,
+                marked_count,
+                num_voice_tokens
             );
         }
 
-        // Flatten and convert back to tensor
-        let flat: Vec<f32> = result
-            .into_iter()
-            .flat_map(|batch| batch.into_iter().flat_map(|seq| seq))
-            .collect();
+        // Step 3: GPU-side selection using index_select pattern
+        if batch_size == 1 {
+            // Optimized path for batch_size=1 (typical case)
 
-        let injected = Tensor::from_vec(
-            flat,
-            (batch_size, seq_len, hidden_size),
-            base_embeds.device(),
-        )?;
+            // Squeeze base to 2D: [1, seq_len, hidden_size] -> [seq_len, hidden_size]
+            let base_2d = base_embeds.squeeze(0)?;
 
-        Ok(injected)
+            // Concatenate: [seq_len + num_voice, hidden_size]
+            let combined = Tensor::cat(&[&base_2d, &voice_2d], 0)?;
+
+            // Create indices tensor on GPU (small transfer)
+            let indices_tensor =
+                Tensor::from_vec(selection_indices, (seq_len,), base_embeds.device())?;
+
+            // Select rows using index_select: result shape [seq_len, hidden_size]
+            let result_2d = combined.index_select(&indices_tensor, 0)?;
+
+            // Unsqueeze back to 3D: [1, seq_len, hidden_size]
+            Ok(result_2d.unsqueeze(0)?)
+        } else {
+            // Fallback for batch_size > 1: process each batch item
+            // This is rare in practice but handles edge cases
+            debug!("  Using batch loop for batch_size={}", batch_size);
+
+            let mut batch_results: Vec<Tensor> = Vec::with_capacity(batch_size);
+
+            for b in 0..batch_size {
+                // Extract this batch's base: [seq_len, hidden_size]
+                let base_b = base_embeds.i(b)?;
+
+                // Concatenate with voice (same voice for all batches, matching Python)
+                let combined = Tensor::cat(&[&base_b, &voice_2d], 0)?;
+
+                // Create indices tensor (reuse the same indices for all batches)
+                let indices_tensor =
+                    Tensor::from_vec(selection_indices.clone(), (seq_len,), base_embeds.device())?;
+
+                // Select rows
+                let result_b = combined.index_select(&indices_tensor, 0)?;
+                batch_results.push(result_b);
+            }
+
+            // Stack batch results: [batch, seq_len, hidden_size]
+            Ok(Tensor::stack(&batch_results, 0)?)
+        }
     }
 
     pub fn tokenize(&self, text: &str) -> Result<Tensor> {
@@ -708,33 +754,14 @@ impl VibeVoiceModel {
             seeded_randn(0.0, 1.0, &[doubled_batch, latent_size], &self.device)?
         };
 
-        let init_vec = speech.flatten_all()?.to_vec1::<f32>()?;
-        let initial_rms = (init_vec.iter().map(|v| v.powi(2)).sum::<f32>() / init_vec.len() as f32).sqrt();
-        let cond_vec = condition.flatten_all()?.to_vec1::<f32>()?;
-        let cond_rms = (cond_vec.iter().map(|v| v.powi(2)).sum::<f32>() / cond_vec.len() as f32).sqrt();
-        debug!(
-            "🔍 Initial noise (doubled): shape=[{}, {}], mean={:.3}, std={:.3}",
-            doubled_batch,
-            latent_size,
-            init_vec.iter().sum::<f32>() / init_vec.len() as f32,
-            initial_rms
-        );
-
-        // Diffusion debugging: log initial state (matching Python format)
-        info!("[DIFF] cfg_scale={:.1}, steps={}", cfg_scale, num_steps);
-        info!("[DIFF] Initial noise RMS: {:.6}, condition RMS: {:.6}", initial_rms, cond_rms);
-        // DIAGNOSTIC: Log first 10 values for exact comparison with Python
-        info!("[DIFF] First 10 noise: {:?}", &init_vec[..10.min(init_vec.len())]);
-        info!("[DIFF] First 10 cond: {:?}", &cond_vec[..10.min(cond_vec.len())]);
-
         // === MULTISTEP SOLVER STATE ===
         // Python tracks model_outputs for 2nd-order solver
         let solver_order = 2usize;
         let mut model_outputs: Vec<Option<Tensor>> = vec![None; solver_order];
         let mut lower_order_nums = 0usize;
 
-        // Concatenate conditions once (used for all steps)
-        let conditions = Tensor::cat(&[condition, neg_condition], 0)?;
+        // Concatenate conditions once (used for all steps) - contiguous for CUDA
+        let conditions = Tensor::cat(&[condition, neg_condition], 0)?.contiguous()?;
 
         debug!("\n🔍 Starting denoising loop (2nd-order DPM-Solver++)...");
 
@@ -752,8 +779,8 @@ impl VibeVoiceModel {
             // === FORWARD PASS (matching Python's half-duplication pattern) ===
             // Python: half = speech[: len(speech) // 2]
             //         combined = torch.cat([half, half], dim=0)
-            let half = speech.narrow(0, 0, batch)?;
-            let combined = Tensor::cat(&[&half, &half], 0)?;
+            let half = speech.narrow(0, 0, batch)?.contiguous()?;
+            let combined = Tensor::cat(&[&half, &half], 0)?.contiguous()?;
 
             let t_tensor = Tensor::new(&[t as f32], &self.device)?;
             let t_batch = t_tensor.broadcast_as((doubled_batch,))?;
@@ -808,8 +835,8 @@ impl VibeVoiceModel {
 
                 // Apply to BOTH halves of speech (matching Python's scheduler.step on full tensor)
                 let term1 = speech.affine(coeff1 as f64, 0.0)?;
-                // For the x0_pred term, we need to apply it to both halves
-                let x0_full = Tensor::cat(&[&x0_pred, &x0_pred], 0)?;
+                // For the x0_pred term, we need to apply it to both halves (contiguous for CUDA)
+                let x0_full = Tensor::cat(&[&x0_pred, &x0_pred], 0)?.contiguous()?;
                 let term2 = x0_full.affine(coeff2 as f64, 0.0)?;
                 (term1 - term2)?
             } else if use_second_order {
@@ -841,8 +868,9 @@ impl VibeVoiceModel {
                     let coeff3 = 0.5 * coeff2;
 
                     let term1 = speech.affine(coeff1 as f64, 0.0)?;
-                    let d0_full = Tensor::cat(&[d0, d0], 0)?;
-                    let d1_full = Tensor::cat(&[&d1, &d1], 0)?;
+                    // contiguous for CUDA compatibility
+                    let d0_full = Tensor::cat(&[d0, d0], 0)?.contiguous()?;
+                    let d1_full = Tensor::cat(&[&d1, &d1], 0)?.contiguous()?;
                     let term2 = d0_full.affine(coeff2 as f64, 0.0)?;
                     let term3 = d1_full.affine(coeff3 as f64, 0.0)?;
                     ((term1 - term2)? - term3)?
@@ -852,7 +880,8 @@ impl VibeVoiceModel {
                     let coeff1 = sigma_t_actual / sigma_s_actual;
                     let coeff2 = alpha_t * ((-h).exp() - 1.0);
                     let term1 = speech.affine(coeff1 as f64, 0.0)?;
-                    let x0_full = Tensor::cat(&[&x0_pred, &x0_pred], 0)?;
+                    // contiguous for CUDA
+                    let x0_full = Tensor::cat(&[&x0_pred, &x0_pred], 0)?.contiguous()?;
                     let term2 = x0_full.affine(coeff2 as f64, 0.0)?;
                     (term1 - term2)?
                 }
@@ -862,7 +891,8 @@ impl VibeVoiceModel {
                 let coeff1 = sigma_t_actual / sigma_s_actual;
                 let coeff2 = alpha_t * ((-h).exp() - 1.0);
                 let term1 = speech.affine(coeff1 as f64, 0.0)?;
-                let x0_full = Tensor::cat(&[&x0_pred, &x0_pred], 0)?;
+                // contiguous for CUDA
+                let x0_full = Tensor::cat(&[&x0_pred, &x0_pred], 0)?.contiguous()?;
                 let term2 = x0_full.affine(coeff2 as f64, 0.0)?;
                 (term1 - term2)?
             };
@@ -872,48 +902,10 @@ impl VibeVoiceModel {
             if lower_order_nums < solver_order {
                 lower_order_nums += 1;
             }
-
-            let sample_vec = speech
-                .narrow(0, 0, batch)?
-                .flatten_all()?
-                .to_vec1::<f32>()?;
-            let sample_std = (sample_vec.iter().map(|v| v.powi(2)).sum::<f32>()
-                / sample_vec.len() as f32)
-                .sqrt();
-            debug!("     Updated sample (first half) std={:.3}", sample_std);
-
-            // Diffusion debugging: log each step (matching Python format)
-            let eps_vec = model_output.flatten_all()?.to_vec1::<f32>()?;
-            let eps_rms = (eps_vec.iter().map(|v| v.powi(2)).sum::<f32>() / eps_vec.len() as f32).sqrt();
-            let half_output_vec = half_output.flatten_all()?.to_vec1::<f32>()?;
-            let half_eps_rms = (half_output_vec.iter().map(|v| v.powi(2)).sum::<f32>() / half_output_vec.len() as f32).sqrt();
-            let speech_rms = sample_std; // Already computed as sample_std
-            info!("[DIFF Step {}] t={}, eps_rms={:.6}, half_eps_rms={:.6}, speech_rms={:.6}",
-                step_index, t, eps_rms, half_eps_rms, speech_rms);
         }
 
         // Return only the first half (matching Python's return speech[: len(speech) // 2])
         let result = speech.narrow(0, 0, batch)?;
-
-        let final_vec = result.flatten_all()?.to_vec1::<f32>()?;
-        let final_mean = final_vec.iter().sum::<f32>() / final_vec.len() as f32;
-        let final_std = (final_vec
-            .iter()
-            .map(|v| (v - final_mean).powi(2))
-            .sum::<f32>()
-            / final_vec.len() as f32)
-            .sqrt();
-
-        debug!("\n🔍 ========== Sampling Complete ==========");
-        debug!(
-            "🔍 Final output: mean={:.3}, std={:.3}",
-            final_mean, final_std
-        );
-        debug!("🔍 ==========================================\n");
-
-        // Diffusion debugging: log final output (matching Python format)
-        let final_rms = (final_vec.iter().map(|v| v.powi(2)).sum::<f32>() / final_vec.len() as f32).sqrt();
-        info!("[DIFF] Final output RMS: {:.6}", final_rms);
 
         Ok(result)
     }
@@ -953,47 +945,25 @@ impl VibeVoiceModel {
     ///
     /// Token IDs are loaded dynamically from the tokenizer during initialization
     fn apply_token_constraints(&self, logits: &Tensor) -> Result<Tensor> {
+        // GPU-side masking: create mask tensor and broadcast-add to logits
         // logits shape: [batch, vocab_size]
         let vocab_size = logits.dim(D::Minus1)?;
-        let batch_size = logits.dim(0)?;
 
-        // For each item in batch, apply constraints
-        let mut constrained_logits = Vec::new();
+        // Build mask on CPU (small - just vocab_size floats), then move to GPU once
+        let mut mask_vec = vec![f32::NEG_INFINITY; vocab_size];
 
-        for b in 0..batch_size {
-            let batch_logits = logits.i((b, ..))?;
-            let mut logits_vec = batch_logits.to_vec1::<f32>()?;
-
-            // Mask all tokens except valid speech tokens
-            for i in 0..vocab_size {
-                let mut is_valid = i == self.speech_start_id as usize
-                    || i == self.speech_end_id as usize
-                    || i == self.speech_diffusion_id as usize
-                    || i == self.eos_token_id as usize;
-
-                // Include bos_token_id if it exists and is different from eos
-                if let Some(bos_id) = self.bos_token_id {
-                    is_valid = is_valid || i == bos_id as usize;
-                }
-
-                if !is_valid {
-                    logits_vec[i] = f32::NEG_INFINITY;
-                }
-            }
-
-            constrained_logits.push(logits_vec);
+        // Set valid tokens to 0.0 (no penalty)
+        mask_vec[self.speech_start_id as usize] = 0.0;
+        mask_vec[self.speech_end_id as usize] = 0.0;
+        mask_vec[self.speech_diffusion_id as usize] = 0.0;
+        mask_vec[self.eos_token_id as usize] = 0.0;
+        if let Some(bos_id) = self.bos_token_id {
+            mask_vec[bos_id as usize] = 0.0;
         }
 
-        // Flatten and create new tensor
-        let flat_logits: Vec<f32> = constrained_logits.into_iter().flatten().collect();
-        let result = Tensor::from_vec(flat_logits, &[batch_size, vocab_size], logits.device())?;
-
-        let valid_count = 4 + if self.bos_token_id.is_some() { 1 } else { 0 };
-        debug!(
-            "  🔒 Token constraints applied: masked {} invalid tokens, allowing {} valid speech tokens",
-            vocab_size * batch_size - valid_count * batch_size,
-            valid_count
-        );
+        // Create mask tensor on GPU and broadcast-add to logits
+        let mask = Tensor::from_vec(mask_vec, vocab_size, logits.device())?;
+        let result = logits.broadcast_add(&mask)?;
 
         Ok(result)
     }
@@ -1002,21 +972,6 @@ impl VibeVoiceModel {
     fn sample_next_token(&self, logits: &Tensor) -> Result<u32> {
         // Apply token constraints to mask invalid tokens
         let constrained_logits = self.apply_token_constraints(logits)?;
-
-        // In sample_next_token, after apply_token_constraints:
-        let constrained_vec = &constrained_logits.to_vec2::<f32>()?[0];
-        let mut indexed: Vec<(usize, f32)> = constrained_vec
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| v > &&f32::NEG_INFINITY) // Only show valid tokens
-            .map(|(i, &v)| (i, v))
-            .collect();
-        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-        debug!("🔍 Top logits AFTER constraints (valid tokens only):");
-        for (i, &(token_id, logit_val)) in indexed.iter().enumerate() {
-            debug!("  {}. token {} = {:.4}", i + 1, token_id, logit_val);
-        }
 
         // Apply sampling strategy
         let next_token = self.sample_greedy(&constrained_logits)?;
@@ -1378,20 +1333,6 @@ impl VibeVoiceModel {
             let seq_len = logits.dim(1)?;
             let logits_last = logits.i((.., seq_len - 1, ..))?;
 
-            // Debug: Show top logits BEFORE constraints
-            let logits_vec = &logits_last.to_vec2::<f32>()?[0];
-            let mut indexed: Vec<(usize, f32)> = logits_vec
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (i, v))
-                .collect();
-            indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-            debug!("🔍 Top 5 logits BEFORE constraints:");
-            for (i, &(token_id, logit_val)) in indexed.iter().take(5).enumerate() {
-                debug!("  {}. token {} = {:.4}", i + 1, token_id, logit_val);
-            }
-
             // Sample next token
             let next_token = self.sample_next_token(&logits_last)?;
 
@@ -1560,10 +1501,8 @@ impl VibeVoiceModel {
                 debug!("  Generated acoustic latent: {:?}", acoustic_latent.dims());
 
                 // Step 2: Decode to audio waveform with streaming cache
-                let scale_val = self.speech_scaling_factor.to_scalar::<f32>()?;
-                let bias_val = self.speech_bias_factor.to_scalar::<f32>()?;
                 let denormalized =
-                    acoustic_latent.affine(1.0 / scale_val as f64, -bias_val as f64)?;
+                    acoustic_latent.affine(1.0 / self.speech_scaling_factor as f64, -self.speech_bias_factor as f64)?;
                 let decoder_input = denormalized.unsqueeze(2)?;
                 let audio = self
                     .vae_decoder
@@ -1579,35 +1518,8 @@ impl VibeVoiceModel {
                 let semantic_embed = self.semantic_connector.forward(&semantic_latent)?;
                 let combined_embed = (&acoustic_embed + &semantic_embed)?;
 
-                // === DIAGNOSTIC: Track quality metrics per token ===
-                let audio_rms = audio.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-                let acoustic_rms = acoustic_latent
-                    .sqr()?
-                    .mean_all()?
-                    .sqrt()?
-                    .to_scalar::<f32>()?;
-                let semantic_rms = semantic_latent
-                    .sqr()?
-                    .mean_all()?
-                    .sqrt()?
-                    .to_scalar::<f32>()?;
-                let combined_rms = combined_embed
-                    .sqr()?
-                    .mean_all()?
-                    .sqrt()?
-                    .to_scalar::<f32>()?;
-
-                // Store generated audio (before logging to get correct count)
+                // Store generated audio
                 audio_chunks.push(audio.clone());
-
-                tracing::info!(
-                    "📊 Token {}: audio_rms={:.6}, acoustic_rms={:.6}, semantic_rms={:.6}, combined_rms={:.6}",
-                    audio_chunks.len(),
-                    audio_rms,
-                    acoustic_rms,
-                    semantic_rms,
-                    combined_rms
-                );
 
                 // Store for next iteration
                 custom_embeds = Some(combined_embed.clone());

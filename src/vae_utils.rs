@@ -118,20 +118,21 @@ impl VAEBlock {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Mixer branch: norm operates on [batch, seq, channels], so we transpose
         let residual = x;
-        let x_t = x.transpose(1, 2)?; // [batch, channels, seq] -> [batch, seq, channels]
+        // (contiguous for CUDA compatibility)
+        let x_t = x.transpose(1, 2)?.contiguous()?; // [batch, channels, seq] -> [batch, seq, channels]
         let normed = self.norm.forward(&x_t)?;
-        let normed = normed.transpose(1, 2)?; // [batch, seq, channels] -> [batch, channels, seq]
+        let normed = normed.transpose(1, 2)?.contiguous()?; // [batch, seq, channels] -> [batch, channels, seq]
         let conv_out = self.mixer_conv.forward(&normed)?;
         let gamma_exp = self.gamma.reshape((1, self.gamma.dims()[0], 1))?; // [1, channels, 1]
         let gated = conv_out.broadcast_mul(&gamma_exp)?;
         let x = (residual + gated)?;
 
-        // FFN branch
+        // FFN branch (contiguous for CUDA compatibility)
         let residual = &x;
-        let x_t = x.transpose(1, 2)?; // [batch, channels, seq] -> [batch, seq, channels]
+        let x_t = x.transpose(1, 2)?.contiguous()?; // [batch, channels, seq] -> [batch, seq, channels]
         let normed = self.ffn_norm.forward(&x_t)?;
         let ffn_out = self.ffn.forward(&normed)?; // [batch, seq, channels]
-        let ffn_out = ffn_out.transpose(1, 2)?; // [batch, seq, channels] -> [batch, channels, seq]
+        let ffn_out = ffn_out.transpose(1, 2)?.contiguous()?; // [batch, seq, channels] -> [batch, channels, seq]
         let ffn_gamma_exp = self.ffn_gamma.reshape((1, self.ffn_gamma.dims()[0], 1))?; // [1, channels, 1]
         let gated = ffn_out.broadcast_mul(&ffn_gamma_exp)?;
         Ok((residual + gated)?)
@@ -145,10 +146,11 @@ impl VAEBlock {
         layer_id: &str,
     ) -> Result<Tensor> {
         // Mixer branch with cache (only mixer_conv needs caching)
+        // (contiguous for CUDA compatibility)
         let residual = x;
-        let x_t = x.transpose(1, 2)?; // [batch, channels, seq] -> [batch, seq, channels]
+        let x_t = x.transpose(1, 2)?.contiguous()?; // [batch, channels, seq] -> [batch, seq, channels]
         let normed = self.norm.forward(&x_t)?;
-        let normed = normed.transpose(1, 2)?; // [batch, seq, channels] -> [batch, channels, seq]
+        let normed = normed.transpose(1, 2)?.contiguous()?; // [batch, seq, channels] -> [batch, channels, seq]
         let conv_out = self
             .mixer_conv
             .forward_with_cache(&normed, cache, layer_id)?;
@@ -157,11 +159,12 @@ impl VAEBlock {
         let x = (residual + gated)?;
 
         // FFN branch (stateless, no cache needed)
+        // (contiguous for CUDA compatibility)
         let residual = &x;
-        let x_t = x.transpose(1, 2)?; // [batch, channels, seq] -> [batch, seq, channels]
+        let x_t = x.transpose(1, 2)?.contiguous()?; // [batch, channels, seq] -> [batch, seq, channels]
         let normed = self.ffn_norm.forward(&x_t)?;
         let ffn_out = self.ffn.forward(&normed)?; // [batch, seq, channels]
-        let ffn_out = ffn_out.transpose(1, 2)?; // [batch, seq, channels] -> [batch, channels, seq]
+        let ffn_out = ffn_out.transpose(1, 2)?.contiguous()?; // [batch, seq, channels] -> [batch, channels, seq]
         let ffn_gamma_exp = self.ffn_gamma.reshape((1, self.ffn_gamma.dims()[0], 1))?; // [1, channels, 1]
         let gated = ffn_out.broadcast_mul(&ffn_gamma_exp)?;
         Ok((residual + gated)?)
