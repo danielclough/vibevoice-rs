@@ -53,7 +53,10 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize file-based logging (only if --tracing flag is set)
-    let _log_path = init_file_logging("vibevoice", args.tracing);
+
+    if args.tracing {
+        let _log_path = init_file_logging("vibevoice");
+    }
 
     // ============================================================================
     // CRITICAL: Set all random seeds FIRST for deterministic output
@@ -293,7 +296,11 @@ fn main() -> Result<()> {
         let audio_duration = total_samples as f32 / 24000.0;
 
         // Audio stats at debug level (F16 compatibility)
-        if let Ok(audio_vec) = concatenated.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>() {
+        if let Ok(audio_vec) = concatenated
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()
+        {
             let mean = audio_vec.iter().sum::<f32>() / audio_vec.len() as f32;
             let max = audio_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let min = audio_vec.iter().cloned().fold(f32::INFINITY, f32::min);

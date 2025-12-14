@@ -4,7 +4,7 @@ use candle_core::{D, DType, Device, Tensor};
 use candle_hf_hub::api::sync::Api;
 use candle_nn::VarBuilder;
 use rand_mt::Mt; // Mersenne Twister 32-bit (MT19937) to match Python's torch.Generator
-                 // IMPORTANT: Must use Mt (32-bit), NOT Mt64 (64-bit) - they produce different sequences!
+// IMPORTANT: Must use Mt (32-bit), NOT Mt64 (64-bit) - they produce different sequences!
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
@@ -255,7 +255,11 @@ pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Re
             debug!("🎲 Using scalar RNG path for {} elements", elem_count);
             let mut data = Vec::with_capacity(elem_count);
             for _ in 0..elem_count {
-                data.push(state.normal.sample_scaled(&mut state.rng, mean_f32, std_f32));
+                data.push(
+                    state
+                        .normal
+                        .sample_scaled(&mut state.rng, mean_f32, std_f32),
+                );
             }
             data
         };
@@ -271,7 +275,9 @@ pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Re
         }
     } else {
         // RNG must be initialized - this is a programming error that would break parity
-        anyhow::bail!("Global CPU RNG not initialized! Call set_all_seeds() before generating random tensors.");
+        anyhow::bail!(
+            "Global CPU RNG not initialized! Call set_all_seeds() before generating random tensors."
+        );
     }
 }
 pub fn download_model_files(repo_id: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
@@ -452,7 +458,7 @@ pub fn create_remapped_varbuilder<'a>(
         decoder_weights_found.len()
     );
 
-    // Use F32 for now
+    // Use BF16 for GPU, F32 for CPU
     let dtype = DType::F32;
 
     // Create VarBuilder from remapped tensors
@@ -650,7 +656,7 @@ fn resample_audio(
 ///
 /// # Returns
 /// Path to the log file (even if logging is disabled)
-pub fn init_file_logging(test_name: &str, enable_logging: bool) -> PathBuf {
+pub fn init_file_logging(test_name: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -665,17 +671,15 @@ pub fn init_file_logging(test_name: &str, enable_logging: bool) -> PathBuf {
 
     let log_path = log_dir.join(format!("{}_{}.log", test_name, timestamp));
 
-    if enable_logging {
-        let log_file = File::create(&log_path).expect("Failed to create log file");
+    let log_file = File::create(&log_path).expect("Failed to create log file");
 
-        // Use RUST_LOG env var if set, otherwise default to info
-        let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    // Use RUST_LOG env var if set, otherwise default to info
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
 
-        tracing_subscriber::registry()
-            .with(EnvFilter::new(&filter))
-            .with(fmt::layer().with_writer(log_file).with_ansi(false))
-            .init();
-    }
+    tracing_subscriber::registry()
+        .with(EnvFilter::new(&filter))
+        .with(fmt::layer().with_writer(log_file).with_ansi(false))
+        .init();
 
     println!("📝 Log: {}", log_path.display());
 
