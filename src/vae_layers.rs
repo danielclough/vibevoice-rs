@@ -4,7 +4,6 @@ use candle_core::{D, DType, Module, Tensor};
 use candle_nn::{
     Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Linear, VarBuilder, linear,
 };
-use tracing::info;
 
 /// Padding utilities
 
@@ -62,7 +61,9 @@ pub fn pad1d(x: &Tensor, paddings: (usize, usize), mode: &str, value: f64) -> Re
             let left_slice = x.narrow(D::Minus1, 1, padding_left)?.contiguous()?;
             let indices: Vec<u32> = (0..padding_left).rev().map(|i| i as u32).collect();
             let indices_tensor = Tensor::from_vec(indices, (padding_left,), x.device())?;
-            let left_pad = left_slice.index_select(&indices_tensor, last_dim)?.contiguous()?;
+            let left_pad = left_slice
+                .index_select(&indices_tensor, last_dim)?
+                .contiguous()?;
             parts.push(left_pad);
         }
 
@@ -75,7 +76,9 @@ pub fn pad1d(x: &Tensor, paddings: (usize, usize), mode: &str, value: f64) -> Re
             let right_slice = x.narrow(D::Minus1, start, padding_right)?.contiguous()?;
             let indices: Vec<u32> = (0..padding_right).rev().map(|i| i as u32).collect();
             let indices_tensor = Tensor::from_vec(indices, (padding_right,), x.device())?;
-            let right_pad = right_slice.index_select(&indices_tensor, last_dim)?.contiguous()?;
+            let right_pad = right_slice
+                .index_select(&indices_tensor, last_dim)?
+                .contiguous()?;
             parts.push(right_pad);
         }
 

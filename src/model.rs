@@ -458,7 +458,8 @@ impl VibeVoiceModel {
         debug!("  Sampled latents shape: {:?}", latents_sampled.dims());
 
         // Step 4: Apply normalization (same as Python: (latents + bias) * scale)
-        let normalized = ((latents_sampled + self.speech_bias_factor as f64)? * self.speech_scaling_factor as f64)?;
+        let normalized = ((latents_sampled + self.speech_bias_factor as f64)?
+            * self.speech_scaling_factor as f64)?;
         debug!("  Normalized latents shape: {:?}", normalized.dims());
 
         // Step 5: Project through acoustic connector to LLM hidden space
@@ -1276,7 +1277,12 @@ impl VibeVoiceModel {
                 info!("[DIAG Step0] Base embeddings RMS: {:.6}", base_rms);
 
                 // DIAGNOSTIC: Log voice embeddings RMS
-                let voice_rms = voice_embeds.unwrap().sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let voice_rms = voice_embeds
+                    .unwrap()
+                    .sqr()?
+                    .mean_all()?
+                    .sqrt()?
+                    .to_scalar::<f32>()?;
                 info!("[DIAG Step0] Voice embeddings RMS: {:.6}", voice_rms);
 
                 let injected_embeds = self.inject_voice_embeddings(
@@ -1286,7 +1292,11 @@ impl VibeVoiceModel {
                 )?;
 
                 // DIAGNOSTIC: Log injected embeddings RMS
-                let injected_rms = injected_embeds.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let injected_rms = injected_embeds
+                    .sqr()?
+                    .mean_all()?
+                    .sqrt()?
+                    .to_scalar::<f32>()?;
                 info!("[DIAG Step0] Injected embeddings RMS: {:.6}", injected_rms);
 
                 used_voice_embeds = true;
@@ -1312,8 +1322,15 @@ impl VibeVoiceModel {
                 let hs_seq_len = pos_hidden_states.dim(1)?;
                 let last_hidden = pos_hidden_states.i((.., hs_seq_len - 1, ..))?;
                 let last_hidden_rms = last_hidden.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-                let all_hidden_rms = pos_hidden_states.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-                info!("[DIAG Step0] LLM hidden states: all_rms={:.6}, last_pos_rms={:.6}", all_hidden_rms, last_hidden_rms);
+                let all_hidden_rms = pos_hidden_states
+                    .sqr()?
+                    .mean_all()?
+                    .sqrt()?
+                    .to_scalar::<f32>()?;
+                info!(
+                    "[DIAG Step0] LLM hidden states: all_rms={:.6}, last_pos_rms={:.6}",
+                    all_hidden_rms, last_hidden_rms
+                );
             }
 
             // ✅ Save positive cache AFTER positive forward
@@ -1405,11 +1422,22 @@ impl VibeVoiceModel {
                 // DIAGNOSTIC: Log negative state before forward (for first token)
                 let token_num = audio_chunks.len() + 1;
                 if token_num <= 3 {
-                    info!("[DIAG NegFwd Token{}] Before: neg_seqlen_offset={}, neg_cache_pos={}, neg_input_len={}, mask_len={}",
-                        token_num, neg_seqlen_offset, neg_cache_position, neg_input_ids.dim(1)?, neg_attn_mask.dim(1)?);
+                    info!(
+                        "[DIAG NegFwd Token{}] Before: neg_seqlen_offset={}, neg_cache_pos={}, neg_input_len={}, mask_len={}",
+                        token_num,
+                        neg_seqlen_offset,
+                        neg_cache_position,
+                        neg_input_ids.dim(1)?,
+                        neg_attn_mask.dim(1)?
+                    );
                     let mask_vec: Vec<u32> = neg_attn_mask.flatten_all()?.to_vec1()?;
                     let ones_count = mask_vec.iter().filter(|&&x| x == 1).count();
-                    info!("[DIAG NegFwd Token{}] Mask ones: {}/{}", token_num, ones_count, mask_vec.len());
+                    info!(
+                        "[DIAG NegFwd Token{}] Mask ones: {}/{}",
+                        token_num,
+                        ones_count,
+                        mask_vec.len()
+                    );
                 }
 
                 let neg_hidden_states = if let Some(neg_embeds) = neg_custom_embeds.take() {
@@ -1432,9 +1460,17 @@ impl VibeVoiceModel {
                 if token_num <= 3 {
                     let neg_hs_seq_len = neg_hidden_states.dim(1)?;
                     let neg_last_hidden = neg_hidden_states.i((.., neg_hs_seq_len - 1, ..))?;
-                    let neg_last_rms = neg_last_hidden.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-                    info!("[DIAG NegFwd Token{}] After: neg_hidden_states shape={:?}, last_pos_rms={:.6}",
-                        token_num, neg_hidden_states.dims(), neg_last_rms);
+                    let neg_last_rms = neg_last_hidden
+                        .sqr()?
+                        .mean_all()?
+                        .sqrt()?
+                        .to_scalar::<f32>()?;
+                    info!(
+                        "[DIAG NegFwd Token{}] After: neg_hidden_states shape={:?}, last_pos_rms={:.6}",
+                        token_num,
+                        neg_hidden_states.dims(),
+                        neg_last_rms
+                    );
                 }
 
                 // === MATCH PYTHON's _update_model_kwargs_for_generation ===
@@ -1484,7 +1520,11 @@ impl VibeVoiceModel {
                 // Diagnostic logging: Track CFG condition quality per token
                 // Consistent RMS values across tokens indicate proper negative condition handling
                 let pos_cond_rms = condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-                let neg_cond_rms = neg_condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let neg_cond_rms = neg_condition
+                    .sqr()?
+                    .mean_all()?
+                    .sqrt()?
+                    .to_scalar::<f32>()?;
                 tracing::info!(
                     "[CFG] Token {}: pos_condition RMS={:.6}, neg_condition RMS={:.6}",
                     audio_chunks.len() + 1,
@@ -1501,8 +1541,10 @@ impl VibeVoiceModel {
                 debug!("  Generated acoustic latent: {:?}", acoustic_latent.dims());
 
                 // Step 2: Decode to audio waveform with streaming cache
-                let denormalized =
-                    acoustic_latent.affine(1.0 / self.speech_scaling_factor as f64, -self.speech_bias_factor as f64)?;
+                let denormalized = acoustic_latent.affine(
+                    1.0 / self.speech_scaling_factor as f64,
+                    -self.speech_bias_factor as f64,
+                )?;
                 let decoder_input = denormalized.unsqueeze(2)?;
                 let audio = self
                     .vae_decoder
