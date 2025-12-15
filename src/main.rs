@@ -227,7 +227,7 @@ fn main() -> Result<()> {
 
         (vec![full_script], Some(voice_samples))
     } else {
-        // Single text mode
+        // Single text mode - use same path as script mode
         // Format text to include "Speaker 1:" prefix if not already present
         let text_with_speaker = if args.text.trim().starts_with("Speaker ") {
             args.text.clone()
@@ -235,18 +235,63 @@ fn main() -> Result<()> {
             format!("Speaker 1: {}", args.text.trim())
         };
 
-        info!("📝 Using text: {}", text_with_speaker);
+        info!("📝 Parsing text input...");
 
-        // Load single voice sample if provided
+        // Parse through same path as script mode
+        let (scripts, speaker_numbers) = parse_txt_script(&text_with_speaker)?;
+
+        // Get unique speakers (in order of first appearance)
+        let mut seen = std::collections::HashSet::new();
+        let unique_speakers: Vec<_> = speaker_numbers
+            .iter()
+            .filter(|s| seen.insert(s.to_string()))
+            .collect();
+
+        info!("Found {} speaker segments:", scripts.len());
+        for (i, (speaker, text)) in speaker_numbers.iter().zip(scripts.iter()).enumerate() {
+            let preview = if text.len() > 50 {
+                format!("{}...", &text[..50])
+            } else {
+                text.clone()
+            };
+            info!("  {}. Speaker {}", i + 1, speaker);
+            info!("     Text preview: {}", preview);
+        }
+
+        // Load voice samples if provided
         let voice_samples = if let Some(voice_input) = &args.voice {
             let resolved_path = resolve_voice_path(voice_input, None)?;
             info!("🎤 Using voice sample: {:?}", resolved_path);
-            Some(vec![vec![resolved_path]])
+
+            // Create voice list for all unique speakers (reuse same voice)
+            let all_voices: Vec<PathBuf> = unique_speakers
+                .iter()
+                .map(|_| resolved_path.clone())
+                .collect();
+
+            Some(vec![all_voices])
+        } else if let Some(voice_paths) = &args.voices {
+            // Multiple explicit voices provided
+            let voices: Vec<PathBuf> = voice_paths
+                .iter()
+                .map(|v| resolve_voice_path(v, None))
+                .collect::<Result<Vec<_>>>()?;
+
+            let all_voices: Vec<PathBuf> = unique_speakers
+                .iter()
+                .enumerate()
+                .map(|(i, _)| voices.get(i).unwrap_or(&voices[0]).clone())
+                .collect();
+
+            Some(vec![all_voices])
         } else {
             None
         };
 
-        (vec![text_with_speaker], voice_samples)
+        // Join all scripts into ONE string (like script mode)
+        let full_script = scripts.join("\n");
+
+        (vec![full_script], voice_samples)
     };
 
     // === PROCESS INPUTS ===
