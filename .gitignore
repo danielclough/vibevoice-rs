@@ -1,5 +1,6 @@
 # Build artifacts
 /target
+/output
 
 # Allowed
 !README.md

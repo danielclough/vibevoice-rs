@@ -120,7 +120,7 @@ impl VibeVoiceModel {
 
         // Initialize tokenizer
         // After loading tokenizer
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
         // Verify special tokens exist with correct IDs
@@ -340,6 +340,11 @@ impl VibeVoiceModel {
         self.solver.num_steps = num_steps;
     }
 
+    /// Get the number of diffusion steps.
+    pub fn num_diffusion_steps(&self) -> usize {
+        self.solver.num_steps
+    }
+
     /// Test-only: Run diffusion sampler with provided conditions
     /// This allows direct testing of the diffusion process in isolation
     /// condition: [batch, hidden_size] - positive LLM hidden state
@@ -399,7 +404,7 @@ impl VibeVoiceModel {
     /// Input:
     ///   - audio: [num_speakers, 1, samples] at 24kHz (padded to max_samples)
     ///   - speech_masks: Optional per-speaker validity mask [num_speakers][max_vae_tokens]
-    ///                   True = valid token, False = padding
+    ///     True = valid token, False = padding
     ///
     /// Output:
     ///   - If speech_masks provided: [total_valid_tokens, hidden_size] - flattened valid embeddings
@@ -1177,7 +1182,7 @@ impl VibeVoiceModel {
         // Determine max iterations (matching Python logic from line 421)
         // Python: max_steps = min(generation_config.max_length - initial_length, max_length_times * initial_length)
         // where max_length = initial_length + max_new_tokens
-        let initial_length = input_ids.dims()[1] as usize;
+        let initial_length = input_ids.dims()[1];
         let max_length_times = 2;
 
         // If max_new_tokens provided, use it; otherwise use config max

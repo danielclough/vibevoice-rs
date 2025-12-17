@@ -10,10 +10,8 @@ use tracing::{debug, warn};
 /// This ensures parity with Python's text handling, preventing bad audio
 /// output when text contains smart/curly quotes from word processors.
 fn normalize_text(text: &str) -> String {
-    text.replace('\u{2019}', "'") // RIGHT SINGLE QUOTATION MARK → apostrophe
-        .replace('\u{2018}', "'") // LEFT SINGLE QUOTATION MARK → apostrophe
-        .replace('\u{201C}', "\"") // LEFT DOUBLE QUOTATION MARK → quote
-        .replace('\u{201D}', "\"") // RIGHT DOUBLE QUOTATION MARK → quote
+    text.replace(['\u{2019}', '\u{2018}'], "'") // LEFT SINGLE QUOTATION MARK → apostrophe
+        .replace(['\u{201C}', '\u{201D}'], "\"") // RIGHT DOUBLE QUOTATION MARK → quote
         .replace('\u{2014}', "--") // EM DASH → double hyphen
         .replace('\u{2013}', "-") // EN DASH → hyphen
         .replace('\u{2026}', "...") // HORIZONTAL ELLIPSIS → three periods

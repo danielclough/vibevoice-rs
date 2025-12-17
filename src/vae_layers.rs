@@ -5,8 +5,6 @@ use candle_nn::{
     Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Linear, VarBuilder, linear,
 };
 
-/// Padding utilities
-
 /// Get extra padding for conv1d to ensure same output length
 fn get_extra_padding_for_conv1d(
     input_length: usize,
@@ -345,6 +343,28 @@ impl SConv1d {
             x.clone()
         };
 
+        // Log cache sum for stem layer to verify zeros
+        if layer_id == "upsample_0" {
+            let cache_sum: f32 = cached_states
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .map(|v| v.abs())
+                .sum();
+            let input_sum: f32 = x
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .map(|v| v.abs())
+                .sum();
+            tracing::info!(
+                "🔬 [STEM CACHE] cache_abs_sum={:.6}, input_abs_sum={:.6}, cache_shape={:?}",
+                cache_sum,
+                input_sum,
+                cached_states.dims()
+            );
+        }
+
         // Apply convolution WITHOUT extra padding (streaming mode doesn't need stride alignment)
         // Just apply the convolution directly - the cached context provides continuity
         let mut output = self.conv.forward(&input_with_context)?;
@@ -356,13 +376,16 @@ impl SConv1d {
         }
 
         // Update cache with last context_size samples from input_with_context
+        // IMPORTANT: Call .contiguous() to ensure we store an independent copy, not a view
         if self.context_size > 0 {
             let total_length = input_with_context.dim(D::Minus1)?;
             let new_cache = if total_length >= self.context_size {
                 let start = total_length - self.context_size;
-                input_with_context.narrow(D::Minus1, start, self.context_size)?
+                input_with_context
+                    .narrow(D::Minus1, start, self.context_size)?
+                    .contiguous()?
             } else {
-                input_with_context.clone()
+                input_with_context.contiguous()?
             };
             debug!("[CACHE {}] Storing cache: {:?}", layer_id, new_cache.dims());
             cache.set(layer_id.to_string(), new_cache)?;
@@ -562,12 +585,15 @@ impl SConvTranspose1d {
         );
 
         // Update cache with last context_size samples
+        // IMPORTANT: Call .contiguous() to ensure we store an independent copy, not a view
         let context_size = self.kernel_size - 1;
         let full_input_len = full_input.dim(D::Minus1)?;
         let new_cache = if full_input_len > context_size {
-            full_input.narrow(D::Minus1, full_input_len - context_size, context_size)?
-        } else {
             full_input
+                .narrow(D::Minus1, full_input_len - context_size, context_size)?
+                .contiguous()?
+        } else {
+            full_input.contiguous()?
         };
         debug!("[CACHE {}] Storing cache: {:?}", layer_id, new_cache.dims());
         cache.set(layer_id.to_string(), new_cache)?;

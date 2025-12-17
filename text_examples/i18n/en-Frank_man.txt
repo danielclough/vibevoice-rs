@@ -1,0 +1,1 @@
+The quick brown fox jumps over the lazy dog. This sentence contains every letter of the alphabet, making it perfect for testing voice synthesis systems.

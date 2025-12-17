@@ -1,22 +1,44 @@
-use anyhow::Result;
-use candle_core::{DType, Tensor};
-use clap::Parser;
+use anyhow::{Result, anyhow};
+use candle_core::{DType, Device, Tensor};
+use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use tracing::{debug, error, info, warn};
 use vibevoice_rs::model::VibeVoiceModel;
 use vibevoice_rs::processor::VibeVoiceProcessor;
+use vibevoice_rs::realtime::{VibeVoiceRealtimeModel, VoiceCache};
 use vibevoice_rs::utils::{
-    create_remapped_varbuilder, download_model_files, get_device, init_file_logging,
-    resolve_voice_path, save_audio_wav, set_all_seeds,
+    create_remapped_varbuilder, download_model_files, download_realtime_model_files, get_device,
+    init_file_logging, resolve_voice_path, save_audio_wav, set_all_seeds,
 };
+use vibevoice_rs::voice_converter;
 use vibevoice_rs::voice_mapper::{VoiceMapper, parse_txt_script};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    /// Model variant: "1.5B" or "7B"
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[command(flatten)]
+    generate: GenerateArgs,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Convert voice cache files from .pt to .safetensors format
+    ConvertVoice {
+        /// Input .pt file (if not provided, converts all in voices/streaming_model)
+        input: Option<PathBuf>,
+        /// Output .safetensors file (auto-generated from input name if not provided)
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct GenerateArgs {
+    /// Model variant: "1.5B" or "7B" (batch) or "realtime" (0.5B streaming)
     #[arg(short, long, default_value = "1.5B")]
     model: String,
     /// Text to synthesize
@@ -48,9 +70,35 @@ struct Args {
     /// Enable file logging (writes to debug/logs/test_outputs/rust/)
     #[arg(long, default_value = "false")]
     tracing: bool,
+
+    // === Realtime model options ===
+    /// Use realtime (0.5B streaming) model
+    #[arg(long)]
+    realtime: bool,
+    /// Pre-computed voice cache file (safetensors) for realtime mode
+    #[arg(long)]
+    voice_cache: Option<PathBuf>,
+    /// Path to realtime model directory (optional, will download if not provided)
+    #[arg(long)]
+    realtime_model_path: Option<PathBuf>,
+    /// Number of diffusion steps for realtime model (default: 5)
+    #[arg(long, default_value = "5")]
+    steps: usize,
 }
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
+
+    // Handle subcommands first
+    if let Some(command) = cli.command {
+        return match command {
+            Commands::ConvertVoice { input, output } => {
+                run_convert_voice(input.as_deref(), output.as_deref())
+            }
+        };
+    }
+
+    // Default: run generate/inference mode
+    let args = cli.generate;
 
     // Initialize file-based logging (only if --tracing flag is set)
 
@@ -66,12 +114,17 @@ fn main() -> Result<()> {
     set_all_seeds(args.seed, &device)?;
     info!("✓ All random seeds set for deterministic output");
 
+    // Check for realtime mode
+    if args.realtime || args.model.to_lowercase() == "realtime" {
+        return run_realtime_inference(&args, &device);
+    }
+
     let model_id = match args.model.as_str() {
         "1.5B" | "1.5b" => "vibevoice/VibeVoice-1.5B",
         "7B" | "7b" => "vibevoice/VibeVoice-7B",
         _ => {
             error!(
-                "Error: Invalid model variant '{}'. Use '1.5B' or '7B'",
+                "Error: Invalid model variant '{}'. Use '1.5B', '7B', or 'realtime'",
                 args.model
             );
             std::process::exit(1);
@@ -80,7 +133,10 @@ fn main() -> Result<()> {
 
     info!("╔════════════════════════════════════════════╗");
     info!("║   VibeVoice Inference with Candle         ║");
-    info!("║   Model: {:<33}║", model_id.split('/').last().unwrap());
+    info!(
+        "║   Model: {:<33}║",
+        model_id.split('/').next_back().unwrap()
+    );
     info!("╚════════════════════════════════════════════╝");
 
     info!("✓ Device: {:?}", device);
@@ -95,7 +151,10 @@ fn main() -> Result<()> {
     let device_ref = device.clone();
     let vb = create_remapped_varbuilder(&model_dir, &device_ref)?;
 
-    info!("🔧 Initializing {}...", model_id.split('/').last().unwrap());
+    info!(
+        "🔧 Initializing {}...",
+        model_id.split('/').next_back().unwrap()
+    );
     let mut model = VibeVoiceModel::new(vb, device.clone(), &config_path, &tokenizer_path)?;
     info!(
         "✓ Model loaded in {:.1}s",
@@ -106,9 +165,13 @@ fn main() -> Result<()> {
     let processor = VibeVoiceProcessor::from_pretrained(&model_dir, &device)?;
     info!("✓ Processor initialized!");
 
-    model.set_ddpm_inference_steps(10);
+    // Batch model uses 20 steps from config (matching Python default)
     model.set_cfg_scale(args.cfg_scale);
-    info!("✓ Diffusion: 10 steps, CFG scale {:.1}", args.cfg_scale);
+    info!(
+        "✓ Diffusion: {} steps, CFG scale {:.1}",
+        model.num_diffusion_steps(),
+        args.cfg_scale
+    );
 
     // === HANDLE SCRIPT FILE OR TEXT INPUT ===
     let (texts, voice_samples) = if let Some(script_path) = &args.script {
@@ -206,14 +269,14 @@ fn main() -> Result<()> {
 
             info!("\nSpeaker mapping ({} unique):", unique_speakers.len());
             for (i, speaker) in unique_speakers.iter().enumerate() {
-                if let Some(voice_paths) = voice_samples_per_speaker.get(i) {
-                    if let Some(voice_path) = voice_paths.first() {
-                        info!(
-                            "  Speaker {} -> {:?}",
-                            speaker,
-                            voice_path.file_name().unwrap()
-                        );
-                    }
+                if let Some(voice_paths) = voice_samples_per_speaker.get(i)
+                    && let Some(voice_path) = voice_paths.first()
+                {
+                    info!(
+                        "  Speaker {} -> {:?}",
+                        speaker,
+                        voice_path.file_name().unwrap()
+                    );
                 }
             }
 
@@ -368,5 +431,148 @@ fn main() -> Result<()> {
 
     info!("✅ Complete!");
 
+    Ok(())
+}
+
+/// HuggingFace repo ID for the realtime model.
+const REALTIME_MODEL_REPO: &str = "VibeVoice/VibeVoice-Realtime-0.5B";
+
+/// Run inference with the realtime (0.5B streaming) model.
+fn run_realtime_inference(args: &GenerateArgs, device: &Device) -> Result<()> {
+    info!("╔════════════════════════════════════════════╗");
+    info!("║   VibeVoice Realtime (0.5B Streaming)     ║");
+    info!("╚════════════════════════════════════════════╝");
+
+    // Check for required voice cache
+    let voice_cache_path = args.voice_cache.as_ref().ok_or_else(|| {
+        anyhow!(
+            "--voice-cache is required for realtime mode.\n\
+             Convert a voice cache with: vibevoice-rs convert-voice\n\
+             Or use: python scripts/convert_voice_cache.py input.pt output.safetensors"
+        )
+    })?;
+
+    // Get model path - download from HuggingFace if not provided
+    let model_path = if let Some(path) = &args.realtime_model_path {
+        path.clone()
+    } else {
+        info!("📥 Downloading realtime model from HuggingFace...");
+        download_realtime_model_files(REALTIME_MODEL_REPO)?
+    };
+
+    let load_start = Instant::now();
+
+    // Load voice cache
+    info!("📥 Loading voice cache from {:?}...", voice_cache_path);
+    let voice_cache = VoiceCache::from_safetensors(voice_cache_path, device)?;
+    info!("{}", voice_cache.summary()?);
+
+    // Load model
+    info!("⚙️  Loading realtime model from {:?}...", model_path);
+    let mut model = VibeVoiceRealtimeModel::from_pretrained(&model_path, device)?;
+
+    // Override diffusion steps from CLI (default: 5, matching Python)
+    model.set_diffusion_steps(args.steps);
+
+    info!(
+        "✓ Model loaded in {:.1}s ({} diffusion steps)",
+        load_start.elapsed().as_secs_f32(),
+        model.num_diffusion_steps()
+    );
+
+    // Get text to synthesize
+    let text = if let Some(script_path) = &args.script {
+        std::fs::read_to_string(script_path)?
+    } else {
+        args.text.clone()
+    };
+
+    info!("📝 Text: \"{}\"", &text[..text.len().min(100)]);
+    if text.len() > 100 {
+        info!("   ... ({} total chars)", text.len());
+    }
+
+    // Generate audio
+    let gen_start = Instant::now();
+    info!("🎵 Generating audio (streaming)...");
+
+    let mut chunk_count = 0;
+    let audio = model.generate(&text, &voice_cache, |_chunk| {
+        chunk_count += 1;
+        if chunk_count % 10 == 0 {
+            debug!("  Generated {} chunks...", chunk_count);
+        }
+        Ok(())
+    })?;
+
+    let gen_elapsed = gen_start.elapsed().as_secs_f32();
+    let audio_samples = audio.dim(2)?;
+    let audio_duration = audio_samples as f32 / 24000.0;
+
+    info!(
+        "✓ Generated {} audio samples ({:.1}s) in {:.1}s",
+        audio_samples, audio_duration, gen_elapsed
+    );
+    info!("   Real-time factor: {:.2}x", audio_duration / gen_elapsed);
+
+    // Save audio
+    save_audio_wav(&audio, &args.output, 24000)?;
+    info!("💾 Saved to {}", args.output);
+
+    info!("✅ Complete!");
+    Ok(())
+}
+
+/// Run voice cache conversion from .pt to .safetensors format.
+fn run_convert_voice(input: Option<&Path>, output: Option<&Path>) -> Result<()> {
+    // Initialize basic logging for conversion
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    info!("╔════════════════════════════════════════════╗");
+    info!("║   Voice Cache Conversion                  ║");
+    info!("╚════════════════════════════════════════════╝");
+
+    if let Some(inp) = input {
+        info!("Input: {:?}", inp);
+        if let Some(out) = output {
+            info!("Output: {:?}", out);
+        }
+    } else {
+        info!(
+            "Converting all .pt files in {}",
+            voice_converter::DEFAULT_VOICE_DIR
+        );
+    }
+
+    let report = voice_converter::convert_voice_caches(input, output)?;
+
+    // Print summary
+    info!("────────────────────────────────────────────");
+    info!(
+        "Conversion complete: {} succeeded, {} failed",
+        report.converted, report.failed
+    );
+
+    if !report.success_paths.is_empty() {
+        info!("Converted files:");
+        for path in &report.success_paths {
+            info!("  ✓ {:?}", path.file_name().unwrap_or_default());
+        }
+    }
+
+    if !report.failures.is_empty() {
+        warn!("Failed conversions:");
+        for (path, error) in &report.failures {
+            warn!("  ✗ {:?}: {}", path.file_name().unwrap_or_default(), error);
+        }
+        return Err(anyhow!(
+            "{} file(s) failed to convert",
+            report.failures.len()
+        ));
+    }
+
+    info!("✅ Complete!");
     Ok(())
 }

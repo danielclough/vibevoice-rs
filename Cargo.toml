@@ -16,10 +16,10 @@ anyhow = "1.0"
 # Args
 clap = { version = "4.5", features = ["derive"] }
 
-# Candle ML framework - core functionality
-candle-core = { git = "https://github.com/danielclough/candle", branch = "fix/qwen2-precision-and-kv-cache" }
-candle-nn = { git = "https://github.com/danielclough/candle", branch = "fix/qwen2-precision-and-kv-cache" }
-candle-transformers = { git = "https://github.com/danielclough/candle", branch = "fix/qwen2-precision-and-kv-cache" }
+# Candle ML framework - core functionality (local path for development)
+candle-core = { git = "https://github.com/danielclough/candle", branch = "feat/forward_from_embeds_no_norm" }
+candle-nn = { git = "https://github.com/danielclough/candle", branch = "feat/forward_from_embeds_no_norm" }
+candle-transformers = { git = "https://github.com/danielclough/candle", branch = "feat/forward_from_embeds_no_norm" }
 
 # HuggingFace Hub integration
 candle-hf-hub = "0.3.2"

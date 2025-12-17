@@ -228,7 +228,7 @@ impl PyTorchNormal {
     /// PyTorch uses a more complex algorithm that we haven't implemented yet.
     pub fn sample_vectorized(rng: &mut Mt, count: usize) -> Vec<f32> {
         assert!(
-            count % 16 == 0,
+            count.is_multiple_of(16),
             "Vectorized path currently only supports multiples of 16, got {}",
             count
         );

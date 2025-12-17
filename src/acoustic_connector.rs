@@ -20,9 +20,13 @@ pub struct AcousticConnector {
 
 impl AcousticConnector {
     pub fn new(vb: VarBuilder, config: &VibeVoiceConfig) -> Result<Self> {
-        let input_dim = config.acoustic_vae_dim; // 64
-        let output_dim = config.llm_config.hidden_size; // 1536 or 3584
+        Self::new_with_params(vb, config.acoustic_vae_dim, config.llm_config.hidden_size)
+    }
 
+    /// Create a new AcousticConnector with explicit parameters.
+    ///
+    /// This is useful for the Realtime model which has a different config structure.
+    pub fn new_with_params(vb: VarBuilder, input_dim: usize, output_dim: usize) -> Result<Self> {
         info!("\n🔧 Initializing Acoustic Connector:");
         info!("   Input dim (VAE): {}", input_dim);
         info!("   Output dim (LLM): {}", output_dim);

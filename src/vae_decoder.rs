@@ -11,7 +11,7 @@ use crate::vae_layers::{Block1D, ConvRMSNorm, SConv1d, SConvTranspose1d};
 /// VAE Stage containing multiple Block1D modules
 /// Matches Python: self.stages in TokenizerDecoder (line 895)
 pub struct VAEStage {
-    blocks: Vec<Block1D>,
+    pub blocks: Vec<Block1D>,
 }
 
 impl VAEStage {
@@ -32,7 +32,7 @@ impl VAEStage {
 
         for block_idx in 0..num_blocks {
             // Weight path: stages.{stage_idx}.{block_idx}.*
-            let block_vb = vb.pp(&block_idx.to_string());
+            let block_vb = vb.pp(block_idx.to_string());
             let block = Block1D::new(
                 block_vb,
                 dim,
@@ -149,7 +149,7 @@ impl VAEDecoder {
                 debug!("  Stage {}: Stem {} -> {}", i, config.vae_dim, out_channels);
 
                 let stem = SConv1d::new(
-                    vb.pp("upsample_layers").pp(&i.to_string()).pp("0"),
+                    vb.pp("upsample_layers").pp(i.to_string()).pp("0"),
                     config.vae_dim,
                     out_channels,
                     config.kernel_size,
@@ -174,7 +174,7 @@ impl VAEDecoder {
                 );
 
                 let upsample = SConvTranspose1d::new(
-                    vb.pp("upsample_layers").pp(&i.to_string()).pp("0"),
+                    vb.pp("upsample_layers").pp(i.to_string()).pp("0"),
                     in_ch,
                     out_ch,
                     kernel_size,
@@ -203,7 +203,7 @@ impl VAEDecoder {
             debug!("  Stage {}: {} blocks, {} channels", i, depth, channels);
 
             let stage = VAEStage::new(
-                vb.pp("stages").pp(&i.to_string()),
+                vb.pp("stages").pp(i.to_string()),
                 i,
                 channels,
                 depth,
@@ -246,6 +246,50 @@ impl VAEDecoder {
             config.causal,
             &config.pad_mode,
         )?;
+
+        // Log weight statistics for comparison with Python
+        // Python: stem_conv = tokenizer.decoder.upsample_layers[0][0].conv.conv
+        // Rust: upsample_layers[0] -> Stem(SConv1d) -> conv
+        if let UpsampleLayer::Stem(ref stem) = upsample_layers[0] {
+            let w = stem.conv.weight();
+            info!(
+                "📊 [VAE WEIGHT] stem weight: {}",
+                crate::utils::tensor_stats(w)
+            );
+        }
+
+        // Python: block0 = tokenizer.decoder.stages[0][0]
+        //         mixer_weight = block0.mixer.conv.conv.conv.weight
+        // Rust: stages[0].blocks[0].mixer.conv
+        if !stages.is_empty() && !stages[0].blocks.is_empty() {
+            let w = stages[0].blocks[0].mixer.conv.weight();
+            info!(
+                "📊 [VAE WEIGHT] stage0.block0 mixer: {}",
+                crate::utils::tensor_stats(w)
+            );
+
+            // Also log gamma (layer scale) values
+            if let Some(ref gamma) = stages[0].blocks[0].gamma {
+                info!(
+                    "📊 [VAE WEIGHT] stage0.block0 gamma: {}",
+                    crate::utils::tensor_stats(gamma)
+                );
+            }
+
+            // Log FFN weights
+            let ffn_w1 = stages[0].blocks[0].ffn.linear1.weight();
+            info!(
+                "📊 [VAE WEIGHT] stage0.block0 ffn.linear1: {}",
+                crate::utils::tensor_stats(ffn_w1)
+            );
+        }
+
+        // Log head weight
+        let head_w = head.conv.weight();
+        info!(
+            "📊 [VAE WEIGHT] head weight: {}",
+            crate::utils::tensor_stats(head_w)
+        );
 
         info!("✓ VAE Decoder initialized successfully\n");
 
@@ -313,6 +357,7 @@ impl VAEDecoder {
         );
 
         let mut x = x.clone();
+        let log_intermediate = cache.tokens_processed() < 3; // Log for first 3 tokens
 
         // Forward features with streaming cache
         for i in 0..self.config.depths.len() {
@@ -321,11 +366,45 @@ impl VAEDecoder {
             x = self.upsample_layers[i].forward_with_cache(&x, cache, &upsample_id)?;
             debug!("  After upsample_layer[{}]: {:?}", i, x.dims());
 
+            // Log intermediate values for debugging
+            if log_intermediate && i == 0 {
+                let flat = x.flatten_all()?;
+                let vals: Vec<f32> = flat.to_vec1()?;
+                let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+                let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>()
+                    / vals.len() as f32)
+                    .sqrt();
+                info!(
+                    "🔬 [TOKEN {}] After stem: mean={:.6}, std={:.6}, shape={:?}",
+                    cache.tokens_processed(),
+                    mean,
+                    std,
+                    x.dims()
+                );
+            }
+
             // Apply stage (Block1D modules) with cache
             // Per-block RMS logging is handled inside VAEStage::forward_with_cache
             let stage_id = format!("stage_{}", i);
             x = self.stages[i].forward_with_cache(&x, cache, &stage_id)?;
             debug!("  After stage[{}]: {:?}", i, x.dims());
+
+            // Log after first stage for debugging
+            if log_intermediate && i == 0 {
+                let flat = x.flatten_all()?;
+                let vals: Vec<f32> = flat.to_vec1()?;
+                let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+                let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>()
+                    / vals.len() as f32)
+                    .sqrt();
+                info!(
+                    "🔬 [TOKEN {}] After stage[0]: mean={:.6}, std={:.6}, shape={:?}",
+                    cache.tokens_processed(),
+                    mean,
+                    std,
+                    x.dims()
+                );
+            }
         }
 
         // Apply final normalization if present (no caching needed)

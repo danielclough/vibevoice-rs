@@ -25,7 +25,7 @@ impl Module for SwiGLU {
         let swish = candle_nn::ops::silu(&gate)?;
         let up = self.w2.forward(x)?;
         let gated = (swish * up)?;
-        Ok(self.w3.forward(&gated)?)
+        self.w3.forward(&gated)
     }
 }
 struct DiffusionLayer {
@@ -176,12 +176,30 @@ pub struct DiffusionHead {
 }
 impl DiffusionHead {
     pub fn new(vb: VarBuilder, config: &VibeVoiceConfig) -> Result<Self> {
-        let hidden_size = config.llm_config.hidden_size;
-        let latent_size = config.diffusion_head_config.latent_size;
-        let num_layers = config.diffusion_head_config.head_layers;
-        let cond_dim = hidden_size; // Define cond_dim as a local variable
+        Self::new_with_params(
+            vb,
+            config.llm_config.hidden_size,
+            config.diffusion_head_config.latent_size,
+            config.diffusion_head_config.head_layers,
+            Some(config.variant_name()),
+        )
+    }
+
+    /// Create a new DiffusionHead with explicit parameters.
+    ///
+    /// This is useful for the Realtime model which has a different config structure.
+    pub fn new_with_params(
+        vb: VarBuilder,
+        hidden_size: usize,
+        latent_size: usize,
+        num_layers: usize,
+        variant_name: Option<&str>,
+    ) -> Result<Self> {
+        let cond_dim = hidden_size;
         info!("\n🔧 Initializing Diffusion Head:");
-        info!("   Variant: {}", config.variant_name());
+        if let Some(name) = variant_name {
+            info!("   Variant: {}", name);
+        }
         info!("   Layers: {}", num_layers);
         info!("   Hidden size: {}", hidden_size);
         info!("   Latent size: {}", latent_size);
@@ -200,7 +218,7 @@ impl DiffusionHead {
         let mut layers = Vec::new();
         for i in 0..num_layers {
             layers.push(DiffusionLayer::new(
-                vb.pp(&format!("layers.{}", i)),
+                vb.pp(format!("layers.{}", i)),
                 hidden_size,
             )?);
         }

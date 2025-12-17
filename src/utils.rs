@@ -72,17 +72,16 @@ pub fn resolve_voice_path(voice_input: &str, script_dir: Option<&Path>) -> Resul
     }
 
     // 2c. Try relative to executable directory
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let relative_to_exe = exe_dir.join(voice_path);
-            if relative_to_exe.exists() {
-                debug!(
-                    "Voice resolved as path relative to exe dir: {:?}",
-                    relative_to_exe
-                );
-                return Ok(relative_to_exe);
-            }
-        }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+        && let relative_to_exe = exe_dir.join(voice_path)
+        && relative_to_exe.exists()
+    {
+        debug!(
+            "Voice resolved as path relative to exe dir: {:?}",
+            relative_to_exe
+        );
+        return Ok(relative_to_exe);
     }
 
     // 3. Treat as a voice name - search in voices directories
@@ -109,10 +108,10 @@ pub fn resolve_voice_path(voice_input: &str, script_dir: Option<&Path>) -> Resul
     search_dirs.push(PathBuf::from("./voices"));
 
     // 3c. Executable directory's voices folder
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            search_dirs.push(exe_dir.join("voices"));
-        }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        search_dirs.push(exe_dir.join("voices"));
     }
 
     // Search each directory
@@ -361,6 +360,67 @@ pub fn download_model_files(repo_id: &str) -> Result<(PathBuf, PathBuf, PathBuf)
 
     Ok((model_dir, config_path, tokenizer_path))
 }
+
+/// Download realtime model files from HuggingFace.
+///
+/// Downloads the VibeVoice-Realtime-0.5B model files:
+/// - config.json - Model configuration
+/// - model.safetensors - Model weights (single file)
+/// - tokenizer.json - Downloaded from Qwen repo and copied to model dir
+///
+/// Returns the model directory path (HuggingFace cache directory).
+pub fn download_realtime_model_files(repo_id: &str) -> Result<PathBuf> {
+    info!("Downloading realtime model files from {}...", repo_id);
+
+    let api = Api::new().map_err(|e| AnyErr::msg(format!("Failed to create HF API: {}", e)))?;
+    let repo = api.model(repo_id.to_string());
+
+    // Download config.json - use its parent as the model directory
+    info!("📥 Downloading config.json...");
+    let config_path = repo
+        .get("config.json")
+        .map_err(|e| AnyErr::msg(format!("Failed to download config.json: {}", e)))?;
+    let model_dir = config_path.parent().unwrap().to_path_buf();
+    debug!("Model directory (HF cache): {:?}", model_dir);
+
+    // Download model weights (single file for realtime model)
+    info!("📥 Downloading model.safetensors...");
+    repo.get("model.safetensors")
+        .map_err(|e| AnyErr::msg(format!("Failed to download model.safetensors: {}", e)))?;
+
+    // Try to get tokenizer from model repo first, fall back to Qwen
+    let tokenizer_dest = model_dir.join("tokenizer.json");
+    if !tokenizer_dest.exists() {
+        // Try model repo first
+        match repo.get("tokenizer.json") {
+            Ok(_) => {
+                info!("📥 Using tokenizer from model repo");
+            }
+            Err(_) => {
+                // Fall back to Qwen tokenizer
+                info!("📥 Downloading tokenizer from Qwen/Qwen2.5-0.5B...");
+                let tokenizer_repo = api.model("Qwen/Qwen2.5-0.5B".to_string());
+                let tokenizer_src = tokenizer_repo.get("tokenizer.json").map_err(|e| {
+                    AnyErr::msg(format!(
+                        "Failed to download tokenizer.json from Qwen: {}",
+                        e
+                    ))
+                })?;
+
+                // Copy tokenizer to model directory for easy access
+                fs::copy(&tokenizer_src, &tokenizer_dest).map_err(|e| {
+                    AnyErr::msg(format!("Failed to copy tokenizer to model dir: {}", e))
+                })?;
+                info!("✓ Tokenizer copied to model directory");
+            }
+        }
+    }
+
+    info!("✓ Realtime model cached in {:?}", model_dir);
+
+    Ok(model_dir)
+}
+
 /// Sinusoidal timestep embedding for diffusion
 pub fn timestep_embedding(timesteps: &Tensor, dim: usize) -> Result<Tensor> {
     let device = timesteps.device();
@@ -375,6 +435,82 @@ pub fn timestep_embedding(timesteps: &Tensor, dim: usize) -> Result<Tensor> {
     let emb_cos = emb.cos()?;
     Ok(Tensor::cat(&[&emb_cos, &emb_sin], D::Minus1)?)
 }
+
+/// Tensor statistics for debugging (matches Python output format).
+///
+/// Returns a formatted string with shape, mean, std, min, max.
+/// Example: "shape=[1, 5, 896], mean=0.003293, std=0.365257, min=-4.322391, max=5.308450"
+pub fn tensor_stats(t: &Tensor) -> String {
+    let shape = format!("{:?}", t.dims());
+
+    // Flatten and convert to f32 for stats
+    let flat = match t.flatten_all().and_then(|f| f.to_dtype(DType::F32)) {
+        Ok(f) => f,
+        Err(e) => return format!("shape={}, error computing stats: {}", shape, e),
+    };
+
+    let data: Vec<f32> = match flat.to_vec1() {
+        Ok(d) => d,
+        Err(e) => return format!("shape={}, error converting to vec: {}", shape, e),
+    };
+
+    if data.is_empty() {
+        return format!("shape={}, (empty tensor)", shape);
+    }
+
+    let n = data.len() as f64;
+    let sum: f64 = data.iter().map(|&x| x as f64).sum();
+    let mean = sum / n;
+
+    let variance: f64 = data
+        .iter()
+        .map(|&x| {
+            let diff = x as f64 - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / n;
+    let std = variance.sqrt();
+
+    let min = data.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+    format!(
+        "shape={}, mean={:.6}, std={:.6}, min={:.6}, max={:.6}",
+        shape, mean, std, min, max
+    )
+}
+
+/// Tensor statistics - returns just the numeric values for comparison.
+/// Returns (mean, std, min, max) tuple.
+pub fn tensor_stats_values(t: &Tensor) -> Result<(f64, f64, f64, f64)> {
+    let flat = t.flatten_all()?.to_dtype(DType::F32)?;
+    let data: Vec<f32> = flat.to_vec1()?;
+
+    if data.is_empty() {
+        return Ok((0.0, 0.0, 0.0, 0.0));
+    }
+
+    let n = data.len() as f64;
+    let sum: f64 = data.iter().map(|&x| x as f64).sum();
+    let mean = sum / n;
+
+    let variance: f64 = data
+        .iter()
+        .map(|&x| {
+            let diff = x as f64 - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / n;
+    let std = variance.sqrt();
+
+    let min = data.iter().cloned().fold(f32::INFINITY, f32::min) as f64;
+    let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+
+    Ok((mean, std, min, max))
+}
+
 /// Save audio tensor to WAV file
 pub fn save_audio_wav(audio: &Tensor, path: &str, sample_rate: u32) -> Result<()> {
     let audio_data = audio.flatten_all()?.to_vec1::<f32>()?;
@@ -414,6 +550,8 @@ pub fn create_remapped_varbuilder<'a>(
     let mut encoder_weights_found = Vec::new();
     let mut decoder_weights_found = Vec::new();
 
+    let mut bf16_count = 0;
+
     for shard_file in &shard_files {
         let tensors = candle_core::safetensors::load(shard_file, device)?;
         for (name, tensor) in tensors {
@@ -424,6 +562,15 @@ pub fn create_remapped_varbuilder<'a>(
             if name.contains("acoustic_tokenizer.decoder") {
                 decoder_weights_found.push(name.clone());
             }
+
+            // Convert BF16 weights to F32 to match Python's torch_dtype=torch.float32
+            let tensor = if tensor.dtype() == DType::BF16 {
+                bf16_count += 1;
+                tensor.to_dtype(DType::F32)?
+            } else {
+                tensor
+            };
+
             let new_name = if name.starts_with("model.language_model.") {
                 name.replace("model.language_model.", "model.")
             } else if name.starts_with("model.acoustic_tokenizer.") {
@@ -442,6 +589,8 @@ pub fn create_remapped_varbuilder<'a>(
             all_tensors.insert(new_name, tensor);
         }
     }
+
+    debug!("Converted {} BF16 tensors to F32", bf16_count);
 
     // Validate VAE components
     if decoder_weights_found.is_empty() {
@@ -464,6 +613,95 @@ pub fn create_remapped_varbuilder<'a>(
     // Create VarBuilder from remapped tensors
     Ok(VarBuilder::from_tensors(all_tensors, dtype, device))
 }
+
+/// Create a VarBuilder for the realtime (streaming) model with remapped tensor names.
+///
+/// The realtime model stores weights at:
+/// - `model.language_model.*` - Lower 4-layer Qwen model (no final norm - uses Identity)
+/// - `model.tts_language_model.*` - Upper 20-layer Qwen model
+///
+/// Qwen2Model expects weights at `model.*` internally, so we remap:
+/// - `model.language_model.X` → `model.language_model.model.X` (for Qwen2Model)
+/// - `model.tts_language_model.X` → `model.tts_language_model.model.X` (for Qwen2Model)
+/// - Other tensors are kept as-is
+///
+/// Also adds a dummy norm.weight for language_model since Python uses nn.Identity().
+/// The norm is skipped during inference via `forward_from_embeds_no_norm()`.
+pub fn create_realtime_remapped_varbuilder<'a>(
+    model_dir: &Path,
+    device: &'a Device,
+) -> Result<VarBuilder<'a>> {
+    let weights_path = model_dir.join("model.safetensors");
+
+    let tensors = candle_core::safetensors::load(&weights_path, device)?;
+    let mut all_tensors: HashMap<String, Tensor> = HashMap::new();
+
+    // Track hidden_size from embed_tokens for creating dummy norm
+    let mut hidden_size: Option<usize> = None;
+
+    let mut bf16_count = 0;
+    let mut f32_count = 0;
+
+    for (name, tensor) in tensors {
+        // Capture hidden_size from embed_tokens
+        if name == "model.language_model.embed_tokens.weight" {
+            hidden_size = Some(tensor.dim(1)?);
+        }
+
+        // Convert BF16 weights to F32 to match Python's torch_dtype=torch.float32
+        let tensor = if tensor.dtype() == DType::BF16 {
+            bf16_count += 1;
+            tensor.to_dtype(DType::F32)?
+        } else {
+            if tensor.dtype() == DType::F32 {
+                f32_count += 1;
+            }
+            tensor
+        };
+
+        let new_name = if name.starts_with("model.language_model.") {
+            // model.language_model.X → model.language_model.model.X
+            name.replace("model.language_model.", "model.language_model.model.")
+        } else if name.starts_with("model.tts_language_model.") {
+            // model.tts_language_model.X → model.tts_language_model.model.X
+            name.replace(
+                "model.tts_language_model.",
+                "model.tts_language_model.model.",
+            )
+        } else {
+            // Keep other tensors as-is (acoustic_connector, tts_input_types, etc.)
+            name
+        };
+        all_tensors.insert(new_name, tensor);
+    }
+
+    debug!(
+        "Converted {} BF16 tensors to F32, {} already F32",
+        bf16_count, f32_count
+    );
+
+    // Add dummy norm.weight for language_model (Python uses nn.Identity())
+    // This tensor is required by Qwen2Model::new() but skipped during inference
+    if let Some(hs) = hidden_size {
+        let dummy_norm = Tensor::ones(&[hs], DType::F32, device)?;
+        all_tensors.insert(
+            "model.language_model.model.norm.weight".to_string(),
+            dummy_norm,
+        );
+        debug!(
+            "Added dummy norm.weight for language_model (hidden_size={})",
+            hs
+        );
+    }
+
+    debug!(
+        "Loaded {} tensors from realtime model (remapped for Qwen2Model)",
+        all_tensors.len()
+    );
+
+    Ok(VarBuilder::from_tensors(all_tensors, DType::F32, device))
+}
+
 /// Normalize audio to target dB FS level
 /// Matches Python AudioNormalizer exactly:
 ///   1. tailor_dB_FS: scalar = 10^(target_dB_FS/20) / (rms + eps)
@@ -628,7 +866,7 @@ fn resample_audio(
 
     // Extract mono channel
     let mut resampled = output_channels
-        .get(0)
+        .first()
         .ok_or("No output channel from resampler")?
         .clone();
 
