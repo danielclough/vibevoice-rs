@@ -1,0 +1,27 @@
+[package]
+name = "vibevoice-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for VibeVoice text-to-speech"
+
+[[bin]]
+name = "vibevoice"
+path = "src/main.rs"
+
+[dependencies]
+vibevoice = { path = "../vibevoice" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+default = []
+cuda = ["vibevoice/cuda"]
+cudnn = ["vibevoice/cudnn"]
+metal = ["vibevoice/metal"]
+flash-attn = ["vibevoice/flash-attn"]
+accelerate = ["vibevoice/accelerate"]
+mkl = ["vibevoice/mkl"]
+gpu = ["vibevoice/gpu"]

@@ -3544,7 +3544,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "vibevoice-rs"
+name = "vibevoice"
 version = "0.1.0"
 dependencies = [
  "accelerate-src",
@@ -3554,7 +3554,6 @@ dependencies = [
  "candle-hf-hub",
  "candle-nn",
  "candle-transformers",
- "clap",
  "hound",
  "intel-mkl-src",
  "ndarray",
@@ -3565,9 +3564,21 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
+ "thiserror 2.0.17",
  "tokenizers",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "vibevoice-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tracing",
+ "tracing-subscriber",
+ "vibevoice",
 ]
 
 [[package]]

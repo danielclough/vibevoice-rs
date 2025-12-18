@@ -1,0 +1,84 @@
+[package]
+name = "vibevoice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "High-quality text-to-speech with voice cloning and multi-speaker synthesis"
+keywords = ["tts", "text-to-speech", "voice-cloning", "speech-synthesis", "ml"]
+categories = ["multimedia::audio", "science"]
+
+[dependencies]
+# Workspace dependencies
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+candle-transformers = { workspace = true }
+candle-hf-hub = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokenizers = { workspace = true }
+hound = { workspace = true }
+
+# Crate-specific
+regex = "1.10"
+rubato = "0.16.2"
+rand_distr = "0.5.1"
+rand_mt = "5.0"
+ndarray = "0.16"
+ndarray-npy = "0.9.1"
+bytemuck = "1.24.0"
+
+# Optional CPU optimizations
+accelerate-src = { version = "0.3.2", optional = true }
+intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"], optional = true }
+
+[features]
+default = []
+
+# GPU features
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cudnn = ["candle-core/cudnn", "candle-nn/cudnn"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+flash-attn = ["candle-transformers/flash-attn"]
+
+# CPU optimizations
+accelerate = [
+    "dep:accelerate-src",
+    "candle-core/accelerate",
+    "candle-nn/accelerate",
+    "candle-transformers/accelerate",
+]
+mkl = [
+    "dep:intel-mkl-src",
+    "candle-core/mkl",
+    "candle-nn/mkl",
+]
+
+# Convenience composite
+gpu = ["cuda", "cudnn", "flash-attn"]
+
+[[example]]
+name = "simple_tts"
+path = "../examples/simple_tts.rs"
+
+[[example]]
+name = "voice_cloning"
+path = "../examples/voice_cloning.rs"
+
+[[example]]
+name = "streaming"
+path = "../examples/streaming.rs"
+
+[[example]]
+name = "multi_speaker"
+path = "../examples/multi_speaker.rs"
+
+[[example]]
+name = "batch_processing"
+path = "../examples/batch_processing.rs"
+
+[dev-dependencies]
