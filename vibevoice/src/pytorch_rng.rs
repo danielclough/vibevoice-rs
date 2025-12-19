@@ -63,10 +63,12 @@ use rand_mt::Mt;
 /// - Even-numbered calls (2nd, 4th, 6th, ...) consume 0 RNG values
 ///
 /// This caching is critical for sequence alignment with PyTorch.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PyTorchNormal {
     /// Cached second value from Box-Muller (None if cache is empty)
     cached_value: Option<f32>,
+    /// Total u32 values consumed from MT19937 since creation/reset
+    u32_consumed: u64,
 }
 
 impl PyTorchNormal {
@@ -75,16 +77,28 @@ impl PyTorchNormal {
     /// The cache starts empty, so the first sample will generate a fresh pair.
     #[inline]
     pub fn new() -> Self {
-        Self { cached_value: None }
+        Self {
+            cached_value: None,
+            u32_consumed: 0,
+        }
     }
 
-    /// Reset the cache.
+    /// Reset the cache and consumption counter.
     ///
     /// Call this when reseeding the RNG to ensure the cache doesn't contain
     /// stale values from a previous seed.
     #[inline]
     pub fn reset_cache(&mut self) {
         self.cached_value = None;
+        self.u32_consumed = 0;
+    }
+
+    /// Get the total number of u32 values consumed from MT19937.
+    ///
+    /// Used for debugging RNG state synchronization with Python.
+    #[inline]
+    pub fn u32_consumed(&self) -> u64 {
+        self.u32_consumed
     }
 
     /// Convert two MT19937 u32 values to a 53-bit uniform double [0, 1).
@@ -106,8 +120,7 @@ impl PyTorchNormal {
     #[inline]
     fn mt_to_uniform_double(lo: u32, hi: u32) -> f64 {
         // Combine two u32 into u64
-        // CRITICAL: PyTorch uses (lo << 32) | hi, NOT (hi << 32) | lo!
-        // This was verified empirically by reverse-engineering randn outputs.
+        // PyTorch uses (lo << 32) | hi for uniform generation
         let combined = ((lo as u64) << 32) | (hi as u64);
         // Extract 53 bits and divide by 2^53
         const MASK_53BIT: u64 = 0x001F_FFFF_FFFF_FFFF; // 53 bits
@@ -152,13 +165,13 @@ impl PyTorchNormal {
         let hi1 = rng.next_u32();
         let lo2 = rng.next_u32();
         let hi2 = rng.next_u32();
+        self.u32_consumed += 4;
 
         let u1 = Self::mt_to_uniform_double(lo1, hi1);
         let u2 = Self::mt_to_uniform_double(lo2, hi2);
 
         // Box-Muller transform (PyTorch's variant) in double precision
         // CRITICAL: Use log(1 - u2), not log(u2), to avoid log(0)
-        // PyTorch uses log1p(-u2) which equals log(1 - u2)
         let r = (-2.0_f64 * (1.0_f64 - u2).ln()).sqrt();
         let theta = 2.0_f64 * std::f64::consts::PI * u1;
 
@@ -168,7 +181,6 @@ impl PyTorchNormal {
 
         // Cache sample2 for next call
         self.cached_value = Some(sample2);
-
         sample1
     }
 
@@ -217,7 +229,6 @@ impl PyTorchNormal {
     ///
     /// # Important
     ///
-    /// This is a **static method** that doesn't use the cached value.
     /// The vectorized path has no caching - it's designed for batch processing.
     /// If you need exact PyTorch parity, use this for size >= 16 and
     /// the scalar `sample()` method for size < 16.
@@ -226,7 +237,7 @@ impl PyTorchNormal {
     ///
     /// Currently panics if `count` is not a multiple of 16. For non-multiples,
     /// PyTorch uses a more complex algorithm that we haven't implemented yet.
-    pub fn sample_vectorized(rng: &mut Mt, count: usize) -> Vec<f32> {
+    pub fn sample_vectorized(&mut self, rng: &mut Mt, count: usize) -> Vec<f32> {
         assert!(
             count.is_multiple_of(16),
             "Vectorized path currently only supports multiples of 16, got {}",
@@ -234,9 +245,10 @@ impl PyTorchNormal {
         );
 
         let mut output = Vec::with_capacity(count);
+        let num_chunks = count / 16;
 
         // Process in chunks of 16
-        for _ in 0..(count / 16) {
+        for _ in 0..num_chunks {
             // Generate 16 uniform values
             let mut uniforms = [0.0_f32; 16];
             for u in uniforms.iter_mut() {
@@ -265,14 +277,23 @@ impl PyTorchNormal {
             output.extend_from_slice(&sin_vals);
         }
 
+        // Track consumption: 16 u32 values per chunk
+        self.u32_consumed += (num_chunks * 16) as u64;
+
         output
     }
 
     /// Generate N normal values with mean and standard deviation using vectorized path.
     ///
     /// Equivalent to `sample_vectorized(rng, count).iter().map(|x| x * std + mean)`.
-    pub fn sample_vectorized_scaled(rng: &mut Mt, count: usize, mean: f32, std: f32) -> Vec<f32> {
-        Self::sample_vectorized(rng, count)
+    pub fn sample_vectorized_scaled(
+        &mut self,
+        rng: &mut Mt,
+        count: usize,
+        mean: f32,
+        std: f32,
+    ) -> Vec<f32> {
+        self.sample_vectorized(rng, count)
             .into_iter()
             .map(|x| x * std + mean)
             .collect()
@@ -309,13 +330,17 @@ mod tests {
     fn test_vectorized_basic() {
         // Test that vectorized produces 16 values
         let mut rng = Mt::new(524242);
-        let values = PyTorchNormal::sample_vectorized(&mut rng, 16);
+        let mut normal = PyTorchNormal::new();
+        let values = normal.sample_vectorized(&mut rng, 16);
         assert_eq!(values.len(), 16);
 
         // All values should be finite
         for v in &values {
             assert!(v.is_finite());
         }
+
+        // Check consumption tracking
+        assert_eq!(normal.u32_consumed(), 16);
     }
 
     #[test]
@@ -323,9 +348,11 @@ mod tests {
         // Same seed should produce same sequence
         let mut rng1 = Mt::new(524242);
         let mut rng2 = Mt::new(524242);
+        let mut normal1 = PyTorchNormal::new();
+        let mut normal2 = PyTorchNormal::new();
 
-        let v1 = PyTorchNormal::sample_vectorized(&mut rng1, 32);
-        let v2 = PyTorchNormal::sample_vectorized(&mut rng2, 32);
+        let v1 = normal1.sample_vectorized(&mut rng1, 32);
+        let v2 = normal2.sample_vectorized(&mut rng2, 32);
 
         assert_eq!(v1, v2);
     }
@@ -379,6 +406,38 @@ mod tests {
             let v2 = normal2.sample(&mut rng2);
             assert_eq!(v1, v2);
         }
+    }
+
+    #[test]
+    fn test_pytorch_parity_seed_524242() {
+        // Test against known Python values
+        // Python: torch.manual_seed(524242); torch.randn(4).tolist()
+        // = [-0.7195818424224854, 2.221095561981201, 0.5087963938713074, 0.8240591883659363]
+
+        // Test SCALAR path (size < 16)
+        let mut rng = Mt::new(524242);
+        let mut normal = PyTorchNormal::new();
+
+        let v1 = normal.sample(&mut rng);
+        let v2 = normal.sample(&mut rng);
+        let v3 = normal.sample(&mut rng);
+        let v4 = normal.sample(&mut rng);
+
+        println!("Rust randn(4) SCALAR path with seed 524242:");
+        println!("  v1 = {} (Python expects: -0.7196)", v1);
+        println!("  v2 = {} (Python expects: 2.2211)", v2);
+        println!("  v3 = {} (Python expects: 0.5088)", v3);
+        println!("  v4 = {} (Python expects: 0.8241)", v4);
+
+        // Test VECTORIZED path (size >= 16)
+        // Python: torch.manual_seed(524242); torch.randn(16).tolist()
+        let mut rng2 = Mt::new(524242);
+        let mut normal2 = PyTorchNormal::new();
+        let vec16 = normal2.sample_vectorized(&mut rng2, 16);
+
+        println!("\nRust randn(16) VECTORIZED path with seed 524242:");
+        println!("  first4 = {:?}", &vec16[0..4]);
+        println!("  (Python randn(16) first4 should be different - vectorized path)");
     }
 
     #[test]

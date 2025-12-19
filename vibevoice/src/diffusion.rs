@@ -205,6 +205,20 @@ impl DiffusionHead {
         info!("   Latent size: {}", latent_size);
         let noisy_images_proj =
             linear_no_bias(latent_size, hidden_size, vb.pp("noisy_images_proj"))?;
+
+        // Log noisy_images_proj weights for comparison with Python
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let w = noisy_images_proj.weight();
+            let w_flat = w.flatten_all()?;
+            let first5: Vec<f32> = w_flat.narrow(0, 0, 5)?.to_vec1()?;
+            let w_mean = w_flat.mean_all()?.to_scalar::<f32>()?;
+            let w_rms = w_flat.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            info!(
+                "[WEIGHTS] noisy_images_proj: shape={:?}, first5={:?}, mean={:.8}, rms={:.6}",
+                w.dims(), first5, w_mean, w_rms
+            );
+        }
+
         let cond_proj = linear_no_bias(hidden_size, cond_dim, vb.pp("cond_proj"))?;
         let frequency_embedding_size = 256;
         let t_embedder_mlp = vec![
@@ -246,7 +260,21 @@ impl DiffusionHead {
         t_emb = candle_nn::ops::silu(&t_emb)?;
         t_emb = self.t_embedder_mlp[1].forward(&t_emb)?; // [1, 1536]
         let condition_proj = self.cond_proj.forward(condition)?; // [1, 1536]
-        let c = (condition_proj + t_emb)?; // [1, 1536]
+        let c = (&condition_proj + &t_emb)?; // [1, 1536]
+
+        // Detailed intermediate logging for debugging conditioning injection
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let x_rms = x.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let t_freq_rms = t_freq.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let t_emb_rms = t_emb.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let cond_proj_rms = condition_proj.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let c_rms = c.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            info!(
+                "[DIFF HEAD] x_rms={:.6}, t_freq_rms={:.6}, t_emb_rms={:.6}, cond_proj_rms={:.6}, c_rms={:.6}",
+                x_rms, t_freq_rms, t_emb_rms, cond_proj_rms, c_rms
+            );
+        }
+
         for layer in &self.layers {
             x = layer.forward(&x, &c)?; // Broadcasting happens in layer
         }

@@ -62,6 +62,9 @@ pub(crate) mod vae_layers;
 pub(crate) mod vae_utils;
 pub(crate) mod voice_mapper;
 
+
+// Re-export file logging utility for CLI
+pub use utils::init_file_logging;
 // Voice converter is public for CLI use
 pub mod voice_converter;
 

@@ -3,6 +3,7 @@ use candle_core::{D, Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 use candle_transformers::models::qwen2::Model as Qwen2Model;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokenizers::Tokenizer;
 use tracing::{debug, info, warn};
 
@@ -12,10 +13,45 @@ use crate::{
     diffusion::{DPMSolverPP, DiffusionHead},
     semantic_tokenizer::SemanticTokenizer,
     speech_connector::SpeechConnector,
-    utils::seeded_randn,
+    utils::{restore_rng_state, save_rng_state, seeded_randn},
     vae_decoder::VAEDecoder,
     vae_encoder::VAEEncoder,
 };
+
+/// Global counter for debug checkpoint files
+static DEBUG_CHECKPOINT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Save a tensor to an NPZ file for debugging (only when tracing is enabled)
+/// Files are saved to debug/checkpoints/ with auto-incrementing names
+fn save_debug_tensor(name: &str, tensor: &Tensor) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+
+    let debug_dir = std::path::Path::new("debug/checkpoints");
+    if std::fs::create_dir_all(debug_dir).is_err() {
+        return;
+    }
+
+    let counter = DEBUG_CHECKPOINT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let filename = debug_dir.join(format!("{:04}_{}.npz", counter, name));
+
+    // Convert tensor to ndarray and save
+    if let Ok(flat) = tensor.flatten_all() {
+        if let Ok(data) = flat.to_vec1::<f32>() {
+            use ndarray::Array1;
+            let arr = Array1::from_vec(data);
+            if let Ok(mut writer) = crate::test_helpers::CheckpointWriter::create(&filename) {
+                let shape: Vec<i64> = tensor.dims().iter().map(|&d| d as i64).collect();
+                let shape_arr = Array1::from_vec(shape.iter().map(|&x| x as f32).collect());
+                let _ = writer.add_array1("shape", &shape_arr);
+                let _ = writer.add_array1("data", &arr);
+                let _ = writer.finish();
+                info!("📁 Saved debug checkpoint: {}", filename.display());
+            }
+        }
+    }
+}
 
 pub struct VibeVoiceModel {
     pub device: Device,
@@ -46,6 +82,14 @@ pub struct VibeVoiceModel {
     precomputed_sigmas: Vec<f32>,
     // Debug: pre-loaded diffusion noise for parity testing
     debug_diffusion_noise: Option<Tensor>,
+    // Seed for voice embedding RNG (isolated from diffusion RNG)
+    // Must be set via set_seed() before voice cloning
+    voice_embedding_seed: Option<u64>,
+    // Whether to restore RNG state after voice embedding so diffusion starts from position 0.
+    // Default: false (no-restore) - diffusion continues from where voice embedding left off.
+    // This matches the quality pattern of Python (where voice uses device RNG, diffusion uses CPU RNG).
+    // When true: diffusion starts from position 0, which may work better for some voices.
+    restore_rng_after_voice_embedding: bool,
 }
 /// Compute sigma schedule matching Python's betas_for_alpha_bar approach.
 ///
@@ -307,6 +351,8 @@ impl VibeVoiceModel {
             bos_token_id,
             precomputed_sigmas,
             debug_diffusion_noise: None,
+            voice_embedding_seed: None,
+            restore_rng_after_voice_embedding: false, // Default: no-restore matches Python quality pattern
         })
     }
 
@@ -334,6 +380,27 @@ impl VibeVoiceModel {
     /// Set the classifier-free guidance scale
     pub fn set_cfg_scale(&mut self, cfg_scale: f32) {
         self.cfg_scale = cfg_scale;
+    }
+
+    /// Set the seed for voice embedding RNG.
+    /// This must be called before voice cloning to ensure reproducible results.
+    /// The seed should match the main RNG seed for consistent behavior.
+    pub fn set_seed(&mut self, seed: u64) {
+        self.voice_embedding_seed = Some(seed);
+    }
+
+    /// Set whether to restore RNG state after voice embedding.
+    ///
+    /// When `false` (default): Diffusion continues from where voice embedding left off.
+    /// This matches Python's quality pattern where Alice works well but Samuel may not.
+    ///
+    /// When `true`: RNG is restored after voice embedding, so diffusion starts from position 0.
+    /// This may work better for some voices (like Samuel) but worse for others (like Alice).
+    ///
+    /// The difference is because Python uses separate RNG streams (MPS for voice, CPU for diffusion),
+    /// while Rust uses a single CPU RNG. The no-restore mode creates a similar "independence" effect.
+    pub fn set_restore_rng_after_voice_embedding(&mut self, restore: bool) {
+        self.restore_rng_after_voice_embedding = restore;
     }
 
     pub fn set_ddpm_inference_steps(&mut self, num_steps: usize) {
@@ -440,11 +507,51 @@ impl VibeVoiceModel {
         let fix_std = 0.5_f64; // From config.acoustic_tokenizer_config.fix_std
         let value = fix_std / 0.8; // = 0.625
 
-        // Generate different random scale per speaker: randn(batch_size) * value
-        // CRITICAL: Must match Python exactly: torch.randn(batch_size) * value
-        // NOT seeded_randn(0, value, ...) which generates N(0, value) directly!
-        // randn() * value produces different values than N(0, value) even with same seed.
+        // Use CPU RNG for voice embedding (seeded_randn for deterministic results).
+        //
+        // Python uses MPS device RNG for voice embedding and CPU RNG for diffusion,
+        // making them independent streams. We use CPU RNG for both, but can optionally
+        // restore the RNG state after voice embedding to create similar independence.
+        //
+        // With restore_rng_after_voice_embedding = false (default):
+        //   - Diffusion continues from where voice embedding left off
+        //   - This matches Python's quality pattern (Alice works, Samuel may not)
+        //
+        // With restore_rng_after_voice_embedding = true:
+        //   - Diffusion starts from position 0 (RNG restored after voice embedding)
+        //   - This may work better for some voices (Samuel) but worse for others (Alice)
+        let saved_rng = if self.restore_rng_after_voice_embedding {
+            Some(save_rng_state()?)
+        } else {
+            None
+        };
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            if self.restore_rng_after_voice_embedding {
+                info!("[RNG] === voice_embedding (CPU RNG with restore) ===");
+            } else {
+                info!("[RNG] === voice_embedding (CPU RNG, no restore) ===");
+            }
+        }
+
         let std_per_batch_base = seeded_randn(0.0, 1.0, &[batch_size], audio.device())?;
+        let noise = seeded_randn(0.0, 1.0, latents_permuted.dims(), audio.device())?;
+
+        // Restore RNG state if configured (so diffusion starts from position 0)
+        if let Some(saved) = saved_rng {
+            restore_rng_state(saved)?;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                info!("[RNG] Restored RNG state after voice embedding");
+            }
+        }
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let vals: Vec<f32> = std_per_batch_base.flatten_all()?.to_vec1()?;
+            info!("[RNG] std_per_batch_base values={:?}", vals);
+            let flat = noise.flatten_all()?;
+            let first5: Vec<f32> = flat.narrow(0, 0, 5.min(flat.dims()[0]))?.to_vec1()?;
+            info!("[RNG] voice_embedding noise first5={:?}", first5);
+        }
         let std_per_batch = (std_per_batch_base * value)?;
         debug!(
             "  Gaussian sampling: std_per_batch shape {:?}",
@@ -453,9 +560,6 @@ impl VibeVoiceModel {
 
         // Expand to [batch, 1, 1] for broadcasting with [batch, time, dim]
         let std_expanded = std_per_batch.unsqueeze(1)?.unsqueeze(2)?;
-
-        // Generate noise same shape as latents
-        let noise = seeded_randn(0.0, 1.0, latents_permuted.dims(), audio.device())?;
 
         // sampled = mean + std_expanded * noise
         let scaled_noise = std_expanded.broadcast_mul(&noise)?;
@@ -752,6 +856,9 @@ impl VibeVoiceModel {
         // where condition.shape[0] = 2*batch (because [cond, neg_cond] are concatenated)
         // Only the first half is actually used, but we generate the same amount for RNG consistency
         let doubled_batch = 2 * batch;
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            info!("[RNG] === diffusion_initial_noise ===");
+        }
         let mut speech = if let Some(ref debug_noise) = self.debug_diffusion_noise {
             // Use pre-loaded debug noise for parity testing
             info!("🔧 Using debug diffusion noise (Python-exported)");
@@ -759,6 +866,13 @@ impl VibeVoiceModel {
         } else {
             seeded_randn(0.0, 1.0, &[doubled_batch, latent_size], &self.device)?
         };
+
+        // Log first few noise values to verify RNG parity with Python
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let flat = speech.flatten_all()?;
+            let first5: Vec<f32> = flat.narrow(0, 0, 5.min(flat.dims()[0]))?.to_vec1()?;
+            info!("[DIFF NOISE] first5={:?}", first5);
+        }
 
         // === MULTISTEP SOLVER STATE ===
         // Python tracks model_outputs for 2nd-order solver
@@ -768,6 +882,21 @@ impl VibeVoiceModel {
 
         // Concatenate conditions once (used for all steps) - contiguous for CUDA
         let conditions = Tensor::cat(&[condition, neg_condition], 0)?.contiguous()?;
+
+        // Diagnostic: Initial noise and condition RMS (matches Python's [DIFF] logging)
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let noise_rms = speech.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let pos_cond_rms = condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let neg_cond_rms = neg_condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            info!(
+                "[DIFF] Initial noise RMS: {:.6}, pos_cond_rms={:.6}, neg_cond_rms={:.6}",
+                noise_rms, pos_cond_rms, neg_cond_rms
+            );
+            // Save debug checkpoints for comparison with Python
+            save_debug_tensor("diffusion_initial_noise", &speech);
+            save_debug_tensor("diffusion_condition", condition);
+            save_debug_tensor("diffusion_neg_condition", neg_condition);
+        }
 
         debug!("\n🔍 Starting denoising loop (2nd-order DPM-Solver++)...");
 
@@ -806,6 +935,18 @@ impl VibeVoiceModel {
             let diff = (cond_output - uncond_output)?;
             let half_output = (uncond_output + diff.affine(cfg_scale as f64, 0.0)?)?;
 
+            // Per-step diagnostic (matches Python's [DIFF Step N] logging)
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let cond_eps_rms = cond_output.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let uncond_eps_rms = uncond_output.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let half_eps_rms = half_output.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let speech_rms = half.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                info!(
+                    "[DIFF Step {}] t={}, cond_eps_rms={:.6}, uncond_eps_rms={:.6}, half_eps_rms={:.6}, speech_rms={:.6}",
+                    step_index, t, cond_eps_rms, uncond_eps_rms, half_eps_rms, speech_rms
+                );
+            }
+
             // === CONVERT MODEL OUTPUT TO x0_pred ===
             // For v_prediction: x0_pred = alpha_t * sample - sigma_t * model_output
             // But we need to use the current sigma (sigma_s), not next sigma
@@ -838,6 +979,14 @@ impl VibeVoiceModel {
                 // x_t = (sigma_t / sigma_s) * sample - alpha_t * (exp(-h) - 1) * x0_pred
                 let coeff1 = sigma_t_actual / sigma_s_actual;
                 let coeff2 = alpha_t * ((-h).exp() - 1.0);
+
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let x0_rms = x0_pred.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                    info!(
+                        "     [1st] h={:.6}, coeff1={:.6}, coeff2={:.6}, x0_rms={:.6}",
+                        h, coeff1, coeff2, x0_rms
+                    );
+                }
 
                 // Apply to BOTH halves of speech (matching Python's scheduler.step on full tensor)
                 let term1 = speech.affine(coeff1 as f64, 0.0)?;
@@ -912,6 +1061,13 @@ impl VibeVoiceModel {
 
         // Return only the first half (matching Python's return speech[: len(speech) // 2])
         let result = speech.narrow(0, 0, batch)?;
+
+        // Diagnostic: Final output RMS (matches Python's [DIFF] Final output RMS)
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let output_rms = result.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            info!("[DIFF] Final output RMS: {:.6}", output_rms);
+            save_debug_tensor("diffusion_output", &result);
+        }
 
         Ok(result)
     }
@@ -1289,6 +1445,7 @@ impl VibeVoiceModel {
                     .sqrt()?
                     .to_scalar::<f32>()?;
                 info!("[DIAG Step0] Voice embeddings RMS: {:.6}", voice_rms);
+                save_debug_tensor("voice_embeddings", voice_embeds.unwrap());
 
                 let injected_embeds = self.inject_voice_embeddings(
                     &base_embeds,
@@ -1564,6 +1721,29 @@ impl VibeVoiceModel {
                     .encode_with_cache(&audio, &mut semantic_cache)?;
                 let semantic_embed = self.semantic_connector.forward(&semantic_latent)?;
                 let combined_embed = (&acoustic_embed + &semantic_embed)?;
+
+                // Diagnostic: audio, semantic, and combined RMS (matches Python output)
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let audio_rms = audio.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                    let semantic_rms = semantic_latent
+                        .sqr()?
+                        .mean_all()?
+                        .sqrt()?
+                        .to_scalar::<f32>()?;
+                    let combined_rms = combined_embed
+                        .sqr()?
+                        .mean_all()?
+                        .sqrt()?
+                        .to_scalar::<f32>()?;
+                    info!(
+                        "📊 Token {}: audio_rms={:.6}, acoustic_rms={:.6}, semantic_rms={:.6}, combined_rms={:.6}",
+                        audio_chunks.len() + 1,
+                        audio_rms,
+                        acoustic_latent.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?,
+                        semantic_rms,
+                        combined_rms
+                    );
+                }
 
                 // Store generated audio
                 audio_chunks.push(audio.clone());

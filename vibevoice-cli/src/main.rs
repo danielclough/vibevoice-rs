@@ -68,9 +68,13 @@ struct GenerateArgs {
     #[arg(long, default_value = "524242")]
     seed: u64,
 
-    /// Number of diffusion steps (realtime model only)
-    #[arg(long, default_value = "5")]
-    steps: usize,
+    /// Restore RNG after voice embedding (may help some voices)
+    #[arg(long)]
+    restore_rng: bool,
+
+    /// Number of diffusion steps (default: 5 for realtime, 10 for batch)
+    #[arg(long)]
+    steps: Option<usize>,
 
     /// Enable tracing logs
     #[arg(long)]
@@ -118,9 +122,7 @@ fn main() -> Result<()> {
     let args = cli.generate;
 
     if args.tracing {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .init();
+        _ = vibevoice::init_file_logging("vibevoice");
     }
 
     // Parse model variant
@@ -145,11 +147,15 @@ fn main() -> Result<()> {
         .variant(variant)
         .device(Device::auto())
         .seed(args.seed)
-        .cfg_scale(args.cfg_scale);
+        .cfg_scale(args.cfg_scale)
+        .restore_rng_after_voice_embedding(args.restore_rng);
 
-    if variant == ModelVariant::Realtime {
-        builder = builder.diffusion_steps(args.steps);
-    }
+    // Use variant-specific default for diffusion steps
+    let steps = args.steps.unwrap_or(match variant {
+        ModelVariant::Realtime => 5,
+        ModelVariant::Batch1_5B | ModelVariant::Batch7B => 10, // Match Python's default
+    });
+    builder = builder.diffusion_steps(steps);
 
     let mut vv = builder.build()?;
 

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// Model variant selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ModelVariant {
     /// 1.5B parameter batch model (default, good quality/speed balance)
     #[default]
@@ -338,12 +338,13 @@ impl VibeVoice {
                     processed_inputs.speech_masks.as_ref(),
                     None::<usize>,
                     true,
-                    Some(move |_chunk: &Tensor| {
+                    Some(move |chunk: &Tensor| {
                         step += 1;
+                        let audio_chunk = AudioData::from_tensor(chunk, 24000).ok();
                         cb(Progress {
                             step,
                             total_steps: None,
-                            audio_chunk: None,
+                            audio_chunk,
                         });
                         Ok(())
                     }),
@@ -418,12 +419,13 @@ impl VibeVoice {
                     processed_inputs.speech_masks.as_ref(),
                     None::<usize>,
                     true,
-                    Some(move |_chunk: &Tensor| {
+                    Some(move |chunk: &Tensor| {
                         step += 1;
+                        let audio_chunk = AudioData::from_tensor(chunk, 24000).ok();
                         cb(Progress {
                             step,
                             total_steps: None,
-                            audio_chunk: None,
+                            audio_chunk,
                         });
                         Ok(())
                     }),
@@ -483,12 +485,13 @@ impl VibeVoice {
         let audio = if let Some(mut cb) = callback {
             let mut step = 0;
             model
-                .generate(text, &voice_cache, move |_chunk| {
+                .generate(text, &voice_cache, move |chunk| {
                     step += 1;
+                    let audio_chunk = AudioData::from_tensor(chunk, 24000).ok();
                     cb(Progress {
                         step,
                         total_steps: None,
-                        audio_chunk: None,
+                        audio_chunk,
                     });
                     Ok(())
                 })
@@ -512,6 +515,7 @@ pub struct VibeVoiceBuilder {
     cfg_scale: f32,
     model_path: Option<String>,
     diffusion_steps: Option<usize>,
+    restore_rng_after_voice_embedding: bool,
 }
 
 impl VibeVoiceBuilder {
@@ -524,6 +528,7 @@ impl VibeVoiceBuilder {
             cfg_scale: 1.3,
             model_path: None,
             diffusion_steps: None,
+            restore_rng_after_voice_embedding: false,
         }
     }
 
@@ -560,6 +565,18 @@ impl VibeVoiceBuilder {
     /// Set the number of diffusion steps (realtime model only).
     pub fn diffusion_steps(mut self, steps: usize) -> Self {
         self.diffusion_steps = Some(steps);
+        self
+    }
+
+    /// Set whether to restore RNG state after voice embedding.
+    ///
+    /// When `false` (default): Diffusion continues from where voice embedding left off.
+    /// This matches Python's quality pattern where some voices work well.
+    ///
+    /// When `true`: RNG is restored after voice embedding, so diffusion starts from position 0.
+    /// This may work better for some voices but worse for others.
+    pub fn restore_rng_after_voice_embedding(mut self, restore: bool) -> Self {
+        self.restore_rng_after_voice_embedding = restore;
         self
     }
 
@@ -601,6 +618,11 @@ impl VibeVoiceBuilder {
                         .map_err(|e| VibeVoiceError::InitializationError(e.to_string()))?;
 
                 model.set_cfg_scale(self.cfg_scale);
+                model.set_seed(self.seed);
+                model.set_restore_rng_after_voice_embedding(self.restore_rng_after_voice_embedding);
+                if let Some(steps) = self.diffusion_steps {
+                    model.set_ddpm_inference_steps(steps);
+                }
 
                 let processor = VibeVoiceProcessor::from_pretrained(&model_dir, &device)
                     .map_err(|e| VibeVoiceError::InitializationError(e.to_string()))?;

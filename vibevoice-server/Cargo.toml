@@ -1,0 +1,39 @@
+[package]
+name = "vibevoice-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vibevoice-server"
+path = "src/main.rs"
+
+[dependencies]
+vibevoice = { path = "../vibevoice" }
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["full", "sync"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.22"
+futures = "0.3"
+serde_yaml = "0.9"
+
+[features]
+default = []
+cuda = ["vibevoice/cuda"]
+cudnn = ["vibevoice/cudnn"]
+metal = ["vibevoice/metal"]
+flash-attn = ["vibevoice/flash-attn"]
+accelerate = ["vibevoice/accelerate"]
+mkl = ["vibevoice/mkl"]
+gpu = ["vibevoice/gpu"]
+
+# Platform-specific convenience features
+macos = ["metal", "accelerate"]
+linux-gpu = ["gpu"]

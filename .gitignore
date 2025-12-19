@@ -1,10 +1,11 @@
 # Build artifacts
 /target
 /output
+dist/
 
 # Allowed
-!README.md
-!.gitignore
+!**/README.md
+!**/.gitignore
 !voices/*.wav
 
 # Debug outputs

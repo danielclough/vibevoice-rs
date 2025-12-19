@@ -1,0 +1,51 @@
+[package]
+name = "vibevoice-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Leptos CSR web frontend for VibeVoice TTS"
+
+[dependencies]
+leptos = { version = "0.7", features = ["csr"] }
+gloo-net = "0.6"
+gloo-storage = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+web-sys = { version = "0.3", features = [
+    "AudioContext",
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioDestinationNode",
+    "BaseAudioContext",
+    "Blob",
+    "BlobPropertyBag",
+    "console",
+    "Document",
+    "Element",
+    "Event",
+    "Headers",
+    "HtmlAnchorElement",
+    "HtmlInputElement",
+    "HtmlSelectElement",
+    "HtmlTextAreaElement",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "TextDecoder",
+    "Url",
+    "Window",
+] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+console_error_panic_hook = "0.1"
+
+# Prevent leptos_config from searching parent directories
+[package.metadata.leptos]
+output-name = "vibevoice-web"

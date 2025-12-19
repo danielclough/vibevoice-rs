@@ -16,9 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_args(&args)?;
 
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    if config.tracing {
+        let _ = vibevoice::init_file_logging("vibevoice");
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .init();
+    }
 
     println!("Loading model...");
     let load_start = Instant::now();
@@ -28,6 +32,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .device(Device::auto())
         .seed(config.seed)
         .cfg_scale(config.cfg_scale)
+        .diffusion_steps(10)
+        .restore_rng_after_voice_embedding(config.restore_rng)
         .build()?;
 
     println!("Model loaded in {:.1}s", load_start.elapsed().as_secs_f32());
@@ -60,6 +66,8 @@ struct Config {
     output_path: String,
     cfg_scale: f32,
     seed: u64,
+    tracing: bool,
+    restore_rng: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Config, &'static str> {
@@ -74,8 +82,10 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
         println!();
         println!("Options:");
         println!("  -o, --output <FILE>  Output path (default: cloned_output.wav)");
-        println!("  --cfg-scale <FLOAT>  CFG scale (default: 1.5)");
-        println!("  --seed <INT>         Random seed (default: 42)");
+        println!("  --cfg-scale <FLOAT>  CFG scale (default: 1.3)");
+        println!("  --seed <INT>         Random seed (default: 524242)");
+        println!("  --tracing            Enable detailed logging to file");
+        println!("  --restore_rng        Restore RNG after voice embedding (may help some voices)");
         println!("  -h, --help           Show this help");
         println!();
         println!("Example:");
@@ -90,6 +100,8 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
     let mut output_path = "cloned_output.wav".to_string();
     let mut cfg_scale = 1.3;
     let mut seed = 524242;
+    let mut tracing = false;
+    let mut restore_rng = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -109,6 +121,14 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
                 seed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(seed);
                 i += 2;
             }
+            "--tracing" => {
+                tracing = true;
+                i += 1;
+            }
+            "--restore_rng" => {
+                restore_rng = true;
+                i += 1;
+            }
             s if !s.starts_with('-') => {
                 text = s.to_string();
                 i += 1;
@@ -123,5 +143,7 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
         output_path,
         cfg_scale,
         seed,
+        tracing,
+        restore_rng,
     })
 }

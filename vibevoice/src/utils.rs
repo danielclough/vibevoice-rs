@@ -209,6 +209,61 @@ pub fn set_all_seeds(seed: u64, device: &Device) -> Result<()> {
     Ok(())
 }
 
+/// Saved RNG state for later restoration.
+/// This allows generating random values without permanently advancing the global RNG.
+#[derive(Clone)]
+pub struct SavedRngState {
+    rng: Mt,
+    normal: PyTorchNormal,
+}
+
+/// Save the current global RNG state for later restoration.
+///
+/// This is useful when you want to generate random values for one purpose
+/// (e.g., voice embedding) without affecting the RNG position for another
+/// purpose (e.g., diffusion noise).
+///
+/// # Example
+/// ```ignore
+/// let saved = save_rng_state()?;
+/// // Generate some random values...
+/// seeded_randn(...)?;
+/// // Restore to original position
+/// restore_rng_state(saved)?;
+/// // Next seeded_randn will use the same position as before
+/// ```
+pub fn save_rng_state() -> Result<SavedRngState> {
+    let rng_guard = GLOBAL_CPU_RNG
+        .lock()
+        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
+
+    let state = rng_guard.as_ref().ok_or_else(|| {
+        AnyErr::msg("RNG not initialized. Call set_all_seeds() first.")
+    })?;
+
+    Ok(SavedRngState {
+        rng: state.rng.clone(),
+        normal: state.normal.clone(),
+    })
+}
+
+/// Restore a previously saved RNG state.
+///
+/// This resets the global RNG to the exact state it was in when save_rng_state() was called,
+/// including the MT19937 internal state and the Box-Muller cache.
+pub fn restore_rng_state(saved: SavedRngState) -> Result<()> {
+    let mut rng_guard = GLOBAL_CPU_RNG
+        .lock()
+        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
+
+    *rng_guard = Some(GlobalRngState {
+        rng: saved.rng,
+        normal: saved.normal,
+    });
+
+    Ok(())
+}
+
 /// Generate a seeded random normal tensor using PyTorch-compatible Box-Muller.
 ///
 /// ALWAYS generates on CPU for true determinism, then transfers to target device.
@@ -240,17 +295,26 @@ pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Re
         let mean_f32 = mean as f32;
         let std_f32 = std as f32;
 
+        // Log RNG state before generation (only when tracing is enabled)
+        let u32_before = if tracing::enabled!(tracing::Level::DEBUG) {
+            state.normal.u32_consumed()
+        } else {
+            0
+        };
+
         let data = if elem_count >= 16 && elem_count % 16 == 0 {
             // Vectorized path: use PyTorch's SIMD-style batch processing
-            // This is critical for parity with torch.randn() for sizes >= 16
+            // This matches torch.randn() for sizes that are multiples of 16
             debug!(
                 "🎲 Using vectorized RNG path for {} elements ({} chunks of 16)",
                 elem_count,
                 elem_count / 16
             );
-            PyTorchNormal::sample_vectorized_scaled(&mut state.rng, elem_count, mean_f32, std_f32)
+            state
+                .normal
+                .sample_vectorized_scaled(&mut state.rng, elem_count, mean_f32, std_f32)
         } else {
-            // Scalar path: use caching Box-Muller for small sizes or non-multiples
+            // Scalar path for small sizes or non-multiples of 16
             debug!("🎲 Using scalar RNG path for {} elements", elem_count);
             let mut data = Vec::with_capacity(elem_count);
             for _ in 0..elem_count {
@@ -262,6 +326,18 @@ pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Re
             }
             data
         };
+
+        // Log RNG state after generation (only when tracing is enabled)
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let u32_after = state.normal.u32_consumed();
+            info!(
+                "[RNG] randn({:?}): u32_consumed {} -> {} (delta={})",
+                shape,
+                u32_before,
+                u32_after,
+                u32_after - u32_before
+            );
+        }
 
         // Create tensor on CPU first
         let cpu_tensor = Tensor::from_vec(data, shape, &Device::Cpu)?;
@@ -279,6 +355,49 @@ pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Re
         );
     }
 }
+/// Generate voice embedding random tensors with isolated RNG matching CPU RNG behavior.
+///
+/// This generates BOTH std_per_batch and noise from a SINGLE RNG instance in sequence,
+/// exactly matching what happens when using the global CPU RNG. This ensures the noise
+/// values are generated from the correct RNG position (after std_per_batch consumed its values).
+///
+/// Returns: (std_per_batch_base, noise) tensors
+pub fn voice_embedding_randn(
+    seed: u64,
+    batch_size: usize,
+    noise_shape: &[usize],
+    device: &Device,
+) -> Result<(Tensor, Tensor)> {
+    let mut rng = Mt::new(seed as u32);
+    let mut normal = PyTorchNormal::new();
+
+    // Generate std_per_batch (scalar path for small sizes)
+    let std_data: Vec<f32> = (0..batch_size)
+        .map(|_| normal.sample(&mut rng))
+        .collect();
+
+    // Generate noise (vectorized path for large sizes)
+    let noise_count: usize = noise_shape.iter().product();
+    let noise_data = if noise_count >= 16 && noise_count % 16 == 0 {
+        normal.sample_vectorized_scaled(&mut rng, noise_count, 0.0, 1.0)
+    } else {
+        (0..noise_count)
+            .map(|_| normal.sample(&mut rng))
+            .collect()
+    };
+
+    // Create tensors on CPU first
+    let std_tensor = Tensor::from_vec(std_data, &[batch_size], &Device::Cpu)?;
+    let noise_tensor = Tensor::from_vec(noise_data, noise_shape, &Device::Cpu)?;
+
+    // Move to device if needed
+    if matches!(device, Device::Cpu) {
+        Ok((std_tensor, noise_tensor))
+    } else {
+        Ok((std_tensor.to_device(device)?, noise_tensor.to_device(device)?))
+    }
+}
+
 pub fn download_model_files(repo_id: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
     info!("Downloading model files from {}...", repo_id);
 
