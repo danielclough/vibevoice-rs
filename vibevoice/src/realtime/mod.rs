@@ -40,11 +40,3 @@ pub mod generation;
 pub mod model;
 pub mod split_llm;
 pub mod voice_cache;
-
-// Re-export main types
-pub use binary_classifier::BinaryClassifier;
-pub use config::{RealtimeConfig, TTS_SPEECH_WINDOW_SIZE, TTS_TEXT_WINDOW_SIZE};
-pub use generation::{GenerationConfig, GenerationState, WindowedGenerator};
-pub use model::VibeVoiceRealtimeModel;
-pub use split_llm::{DualKvCaches, DualLmOutput, DualSplitLLM, DualTtsLmOutput};
-pub use voice_cache::{CacheEntry, VoiceCache};

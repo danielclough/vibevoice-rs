@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VibeVoice",
+  "version": "0.1.0",
+  "identifier": "com.vibevoice.app",
+  "build": {
+    "beforeDevCommand": {
+      "cwd": "../vibevoice-web",
+      "script": "trunk serve --port 8080"
+    },
+    "beforeBuildCommand": {
+      "cwd": "../vibevoice-web",
+      "script": "trunk build --release"
+    },
+    "devUrl": "http://localhost:8080",
+    "frontendDist": "../vibevoice-web/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "'self' http://localhost:3000 http://127.0.0.1:3000",
+        "script-src": "'self' 'wasm-unsafe-eval'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' asset: http://asset.localhost blob: data:"
+      }
+    },
+    "windows": [
+      {
+        "title": "VibeVoice",
+        "width": 900,
+        "height": 700,
+        "minWidth": 600,
+        "minHeight": 500,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "VibeVoice",
+    "category": "Utility",
+    "shortDescription": "High-quality text-to-speech with voice cloning",
+    "longDescription": "VibeVoice is a desktop application for high-quality text-to-speech synthesis with voice cloning capabilities.",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
+  },
+  "plugins": {}
+}

@@ -14,3 +14,6 @@ samples_dir: /Users/daniel/git/vibevoice-rs/voices/
 
 # Optional directory to save output WAV files
 output_dir: /Users/daniel/git/vibevoice-rs/output/
+
+# Directory containing built vibevoice-web frontend to serve at /
+web_dir: /Users/daniel/git/vibevoice-rs/vibevoice-web/dist

@@ -34,16 +34,6 @@ impl SpeechConnector {
         })
     }
 
-    /// Create acoustic connector (64 -> hidden_size)
-    pub fn new_acoustic(vb: VarBuilder, config: &VibeVoiceConfig) -> Result<Self> {
-        Self::new(
-            vb,
-            config.acoustic_vae_dim,
-            config.llm_config.hidden_size,
-            "Acoustic",
-        )
-    }
-
     /// Create semantic connector (128 -> hidden_size)
     pub fn new_semantic(vb: VarBuilder, config: &VibeVoiceConfig) -> Result<Self> {
         Self::new(

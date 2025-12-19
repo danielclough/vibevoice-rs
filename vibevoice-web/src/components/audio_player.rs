@@ -10,8 +10,8 @@ pub fn AudioPlayer(audio_data: Signal<Option<Vec<u8>>>) -> impl IntoView {
             let array = js_sys::Array::new();
             array.push(&uint8_array.buffer());
 
-            let mut options = BlobPropertyBag::new();
-            options.type_("audio/wav");
+            let options = BlobPropertyBag::new();
+            options.set_type("audio/wav");
 
             Blob::new_with_u8_array_sequence_and_options(&array, &options)
                 .ok()

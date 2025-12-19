@@ -91,12 +91,3 @@ pub async fn synthesize_json(
         message: format!("Failed to parse synthesis response: {}", e),
     })
 }
-
-pub async fn check_health(server_url: &str) -> Result<bool, ApiError> {
-    let url = format!("{}/health", server_url.trim_end_matches('/'));
-    let response = Request::get(&url)
-        .send()
-        .await?;
-
-    Ok(response.ok())
-}

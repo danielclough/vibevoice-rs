@@ -19,7 +19,7 @@ pub const TTS_TEXT_WINDOW_SIZE: usize = 5;
 /// Python: `TTS_SPEECH_WINDOW_SIZE = 6`
 pub const TTS_SPEECH_WINDOW_SIZE: usize = 6;
 
-/// Audio sample rate for VibeVoice models.
+/// Audio sample rate for VibeVoice models (24kHz).
 pub const AUDIO_SAMPLE_RATE: u32 = 24000;
 
 /// Default number of upper layers for TTS (tts_language_model).
@@ -273,11 +273,5 @@ mod tests {
 
         let tts_config = config.to_tts_lm_qwen2_config();
         assert_eq!(tts_config.num_hidden_layers, 20);
-    }
-
-    #[test]
-    fn test_window_constants() {
-        assert_eq!(TTS_TEXT_WINDOW_SIZE, 5);
-        assert_eq!(TTS_SPEECH_WINDOW_SIZE, 6);
     }
 }

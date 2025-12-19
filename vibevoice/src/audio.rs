@@ -19,6 +19,8 @@ impl AudioData {
         let samples = tensor
             .to_dtype(DType::F32)
             .map_err(|e| VibeVoiceError::AudioError(e.to_string()))?
+            .contiguous()
+            .map_err(|e| VibeVoiceError::AudioError(e.to_string()))?
             .flatten_all()
             .map_err(|e| VibeVoiceError::AudioError(e.to_string()))?
             .to_vec1::<f32>()

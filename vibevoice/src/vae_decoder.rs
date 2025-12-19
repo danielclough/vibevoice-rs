@@ -50,14 +50,6 @@ impl VAEStage {
         Ok(Self { blocks })
     }
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let mut x = x.clone();
-        for block in &self.blocks {
-            x = block.forward(&x)?;
-        }
-        Ok(x)
-    }
-
     /// Forward pass with streaming cache support
     pub fn forward_with_cache(
         &self,
@@ -101,13 +93,6 @@ enum UpsampleLayer {
 }
 
 impl UpsampleLayer {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        match self {
-            UpsampleLayer::Stem(conv) => conv.forward(x),
-            UpsampleLayer::Upsample(convtr) => convtr.forward(x),
-        }
-    }
-
     /// Forward pass with streaming cache support
     fn forward_with_cache(
         &self,
@@ -300,44 +285,6 @@ impl VAEDecoder {
             norm,
             head,
         })
-    }
-
-    /// Decode latents to audio
-    /// Matches Python TokenizerDecoder.forward (lines 948-951)
-    pub fn decode(&self, x: &Tensor) -> Result<Tensor> {
-        debug!("\n🔍 === VAE DECODE (Python-matched) ===");
-        debug!("  Input shape: {:?}", x.dims());
-
-        let mut x = x.clone();
-
-        // Forward features matching Python forward_features (lines 914-946)
-        for i in 0..self.config.depths.len() {
-            // Apply upsampling layer
-            x = self.upsample_layers[i].forward(&x)?;
-            debug!("  After upsample_layer[{}]: {:?}", i, x.dims());
-
-            // Apply stage (Block1D modules)
-            x = self.stages[i].forward(&x)?;
-            debug!("  After stage[{}]: {:?}", i, x.dims());
-        }
-
-        // Apply final normalization if present
-        if let Some(ref norm) = self.norm {
-            x = norm.forward(&x)?;
-            debug!("  After norm: {:?}", x.dims());
-        }
-
-        // Apply head convolution
-        x = self.head.forward(&x)?;
-        debug!("  After head: {:?}", x.dims());
-
-        // NOTE: Python VAE decoder does NOT apply tanh - return raw head output
-        // See modular_vibevoice_tokenizer.py:948-951 - forward() returns head(x) directly
-        let audio = x;
-        debug!("  Final audio: {:?}", audio.dims());
-        debug!("🔍 =====================================\n");
-
-        Ok(audio)
     }
 
     /// Decode latents to audio with streaming cache support

@@ -1,3 +1,1 @@
-mod stream;
-
-pub use stream::*;
+pub mod stream;

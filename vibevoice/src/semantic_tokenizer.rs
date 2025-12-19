@@ -40,21 +40,6 @@ impl SemanticTokenizer {
         })
     }
 
-    /// Encode audio to semantic latent representations
-    /// Input: audio [batch, channels, samples]
-    /// Output: latents [batch, seq_len, vae_dim]
-    pub fn encode(&self, audio: &Tensor) -> Result<Tensor> {
-        // Pass through encoder
-        // Output shape: [batch, vae_dim, seq_len]
-        let latents = self.encoder.encode(audio)?;
-
-        // Permute to [batch, seq_len, vae_dim]
-        // This matches Python line 1175: latents.permute(0, 2, 1)
-        let latents = latents.permute((0, 2, 1))?;
-
-        Ok(latents)
-    }
-
     /// Encode audio with streaming cache support
     /// With cache, this outputs only NEW tokens (incremental)
     /// Input: audio [batch, channels, samples] - new audio chunk

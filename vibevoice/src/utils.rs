@@ -1,17 +1,13 @@
-use crate::pytorch_rng::PyTorchNormal;
 use anyhow::{Error as AnyErr, Result};
 use candle_core::{D, DType, Device, Tensor};
 use candle_hf_hub::api::sync::Api;
 use candle_nn::VarBuilder;
-use rand_mt::Mt; // Mersenne Twister 32-bit (MT19937) to match Python's torch.Generator
-// IMPORTANT: Must use Mt (32-bit), NOT Mt64 (64-bit) - they produce different sequences!
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use serde_json;
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::{fs, path::Path};
 use tracing::{debug, error, info, warn};
 
@@ -136,20 +132,6 @@ pub fn resolve_voice_path(voice_input: &str, script_dir: Option<&Path>) -> Resul
         searched_locations.join(", ")
     )))
 }
-
-/// Global CPU RNG state for deterministic random generation across all functions.
-/// Includes both the MT19937 generator AND the Box-Muller cache for PyTorch parity.
-///
-/// IMPORTANT: Python's torch.manual_seed() uses MT19937 (32-bit), NOT MT19937-64!
-/// This MUST be at module level to be shared between set_all_seeds() and seeded_randn().
-struct GlobalRngState {
-    /// Mersenne Twister 32-bit generator (identical to PyTorch's)
-    rng: Mt,
-    /// PyTorch-compatible Box-Muller with caching
-    normal: PyTorchNormal,
-}
-
-static GLOBAL_CPU_RNG: Mutex<Option<GlobalRngState>> = Mutex::new(None);
 /// Device selection with CUDA and Metal support
 pub fn get_device(cuda_device: Option<usize>) -> Result<Device> {
     if let Some(ordinal) = cuda_device {
@@ -170,231 +152,6 @@ pub fn get_device(cuda_device: Option<usize>) -> Result<Device> {
             info!("Metal not available, falling back to CPU");
             Ok(Device::Cpu)
         }
-    }
-}
-
-/// Set all random seeds for full reproducibility across CPU, CUDA, and Metal.
-/// This function must be called BEFORE any model loading to ensure deterministic behavior.
-///
-/// Uses Mersenne Twister 32-bit (MT19937) to match Python's torch.Generator, and resets
-/// the Box-Muller cache to ensure the same sequence as a fresh PyTorch session.
-///
-/// # Important
-///
-/// This function resets BOTH the MT19937 state AND the Box-Muller cache. If you only
-/// reset the MT19937 without clearing the cache, you'll get a different sequence than
-/// PyTorch because the cached second value from the previous Box-Muller pair would
-/// be returned first.
-pub fn set_all_seeds(seed: u64, device: &Device) -> Result<()> {
-    // Set device seed (only for CUDA/Metal, CPU doesn't support set_seed)
-    if !matches!(device, Device::Cpu) {
-        device.set_seed(seed)?;
-    }
-
-    // Initialize the global RNG state with both MT19937 AND a fresh Box-Muller cache
-    // NOTE: PyTorch internally uses MT19937 (32-bit), so we truncate the seed to u32
-    // This matches Python's behavior: torch.manual_seed(654321) uses the lower 32 bits
-    let mut rng_guard = GLOBAL_CPU_RNG
-        .lock()
-        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
-    *rng_guard = Some(GlobalRngState {
-        rng: Mt::new(seed as u32),
-        normal: PyTorchNormal::new(), // Fresh cache - critical for sequence alignment
-    });
-
-    debug!(
-        "🎲 All random seeds set to {} (device + MT19937-32bit + Box-Muller cache)",
-        seed
-    );
-    Ok(())
-}
-
-/// Saved RNG state for later restoration.
-/// This allows generating random values without permanently advancing the global RNG.
-#[derive(Clone)]
-pub struct SavedRngState {
-    rng: Mt,
-    normal: PyTorchNormal,
-}
-
-/// Save the current global RNG state for later restoration.
-///
-/// This is useful when you want to generate random values for one purpose
-/// (e.g., voice embedding) without affecting the RNG position for another
-/// purpose (e.g., diffusion noise).
-///
-/// # Example
-/// ```ignore
-/// let saved = save_rng_state()?;
-/// // Generate some random values...
-/// seeded_randn(...)?;
-/// // Restore to original position
-/// restore_rng_state(saved)?;
-/// // Next seeded_randn will use the same position as before
-/// ```
-pub fn save_rng_state() -> Result<SavedRngState> {
-    let rng_guard = GLOBAL_CPU_RNG
-        .lock()
-        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
-
-    let state = rng_guard.as_ref().ok_or_else(|| {
-        AnyErr::msg("RNG not initialized. Call set_all_seeds() first.")
-    })?;
-
-    Ok(SavedRngState {
-        rng: state.rng.clone(),
-        normal: state.normal.clone(),
-    })
-}
-
-/// Restore a previously saved RNG state.
-///
-/// This resets the global RNG to the exact state it was in when save_rng_state() was called,
-/// including the MT19937 internal state and the Box-Muller cache.
-pub fn restore_rng_state(saved: SavedRngState) -> Result<()> {
-    let mut rng_guard = GLOBAL_CPU_RNG
-        .lock()
-        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
-
-    *rng_guard = Some(GlobalRngState {
-        rng: saved.rng,
-        normal: saved.normal,
-    });
-
-    Ok(())
-}
-
-/// Generate a seeded random normal tensor using PyTorch-compatible Box-Muller.
-///
-/// ALWAYS generates on CPU for true determinism, then transfers to target device.
-/// This ensures reproducible results across CPU, CUDA, and Metal.
-///
-/// # PyTorch Parity
-///
-/// This function automatically selects the correct algorithm based on tensor size:
-///
-/// - **Size < 16**: Uses scalar Box-Muller with 53-bit double-precision uniforms
-/// - **Size >= 16 (multiple of 16)**: Uses vectorized Box-Muller with 24-bit float uniforms
-///
-/// Both paths produce bit-identical results to PyTorch given the same seed.
-///
-/// # Important
-///
-/// For sizes >= 16 that aren't multiples of 16, this currently falls back to the
-/// scalar path. PyTorch's actual behavior for non-multiples is more complex and
-/// involves partial vectorized batches.
-pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Result<Tensor> {
-    // Always use the global CPU RNG for determinism
-    // GPU random generation (Tensor::randn on Metal/CUDA) may not respect seeds properly
-    let mut rng_guard = GLOBAL_CPU_RNG
-        .lock()
-        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
-
-    if let Some(ref mut state) = *rng_guard {
-        let elem_count = shape.iter().product::<usize>();
-        let mean_f32 = mean as f32;
-        let std_f32 = std as f32;
-
-        // Log RNG state before generation (only when tracing is enabled)
-        let u32_before = if tracing::enabled!(tracing::Level::DEBUG) {
-            state.normal.u32_consumed()
-        } else {
-            0
-        };
-
-        let data = if elem_count >= 16 && elem_count % 16 == 0 {
-            // Vectorized path: use PyTorch's SIMD-style batch processing
-            // This matches torch.randn() for sizes that are multiples of 16
-            debug!(
-                "🎲 Using vectorized RNG path for {} elements ({} chunks of 16)",
-                elem_count,
-                elem_count / 16
-            );
-            state
-                .normal
-                .sample_vectorized_scaled(&mut state.rng, elem_count, mean_f32, std_f32)
-        } else {
-            // Scalar path for small sizes or non-multiples of 16
-            debug!("🎲 Using scalar RNG path for {} elements", elem_count);
-            let mut data = Vec::with_capacity(elem_count);
-            for _ in 0..elem_count {
-                data.push(
-                    state
-                        .normal
-                        .sample_scaled(&mut state.rng, mean_f32, std_f32),
-                );
-            }
-            data
-        };
-
-        // Log RNG state after generation (only when tracing is enabled)
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            let u32_after = state.normal.u32_consumed();
-            info!(
-                "[RNG] randn({:?}): u32_consumed {} -> {} (delta={})",
-                shape,
-                u32_before,
-                u32_after,
-                u32_after - u32_before
-            );
-        }
-
-        // Create tensor on CPU first
-        let cpu_tensor = Tensor::from_vec(data, shape, &Device::Cpu)?;
-
-        // Transfer to target device if needed
-        if matches!(device, Device::Cpu) {
-            Ok(cpu_tensor)
-        } else {
-            Ok(cpu_tensor.to_device(device)?)
-        }
-    } else {
-        // RNG must be initialized - this is a programming error that would break parity
-        anyhow::bail!(
-            "Global CPU RNG not initialized! Call set_all_seeds() before generating random tensors."
-        );
-    }
-}
-/// Generate voice embedding random tensors with isolated RNG matching CPU RNG behavior.
-///
-/// This generates BOTH std_per_batch and noise from a SINGLE RNG instance in sequence,
-/// exactly matching what happens when using the global CPU RNG. This ensures the noise
-/// values are generated from the correct RNG position (after std_per_batch consumed its values).
-///
-/// Returns: (std_per_batch_base, noise) tensors
-pub fn voice_embedding_randn(
-    seed: u64,
-    batch_size: usize,
-    noise_shape: &[usize],
-    device: &Device,
-) -> Result<(Tensor, Tensor)> {
-    let mut rng = Mt::new(seed as u32);
-    let mut normal = PyTorchNormal::new();
-
-    // Generate std_per_batch (scalar path for small sizes)
-    let std_data: Vec<f32> = (0..batch_size)
-        .map(|_| normal.sample(&mut rng))
-        .collect();
-
-    // Generate noise (vectorized path for large sizes)
-    let noise_count: usize = noise_shape.iter().product();
-    let noise_data = if noise_count >= 16 && noise_count % 16 == 0 {
-        normal.sample_vectorized_scaled(&mut rng, noise_count, 0.0, 1.0)
-    } else {
-        (0..noise_count)
-            .map(|_| normal.sample(&mut rng))
-            .collect()
-    };
-
-    // Create tensors on CPU first
-    let std_tensor = Tensor::from_vec(std_data, &[batch_size], &Device::Cpu)?;
-    let noise_tensor = Tensor::from_vec(noise_data, noise_shape, &Device::Cpu)?;
-
-    // Move to device if needed
-    if matches!(device, Device::Cpu) {
-        Ok((std_tensor, noise_tensor))
-    } else {
-        Ok((std_tensor.to_device(device)?, noise_tensor.to_device(device)?))
     }
 }
 
@@ -600,54 +357,6 @@ pub fn tensor_stats(t: &Tensor) -> String {
     )
 }
 
-/// Tensor statistics - returns just the numeric values for comparison.
-/// Returns (mean, std, min, max) tuple.
-pub fn tensor_stats_values(t: &Tensor) -> Result<(f64, f64, f64, f64)> {
-    let flat = t.flatten_all()?.to_dtype(DType::F32)?;
-    let data: Vec<f32> = flat.to_vec1()?;
-
-    if data.is_empty() {
-        return Ok((0.0, 0.0, 0.0, 0.0));
-    }
-
-    let n = data.len() as f64;
-    let sum: f64 = data.iter().map(|&x| x as f64).sum();
-    let mean = sum / n;
-
-    let variance: f64 = data
-        .iter()
-        .map(|&x| {
-            let diff = x as f64 - mean;
-            diff * diff
-        })
-        .sum::<f64>()
-        / n;
-    let std = variance.sqrt();
-
-    let min = data.iter().cloned().fold(f32::INFINITY, f32::min) as f64;
-    let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
-
-    Ok((mean, std, min, max))
-}
-
-/// Save audio tensor to WAV file
-pub fn save_audio_wav(audio: &Tensor, path: &str, sample_rate: u32) -> Result<()> {
-    let audio_data = audio.flatten_all()?.to_vec1::<f32>()?;
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::create(path, spec)?;
-    for sample in audio_data {
-        let amplitude = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        writer.write_sample(amplitude)?;
-    }
-    writer.finalize()?;
-    info!("\n💾 Saved audio to: {}", path);
-    Ok(())
-}
 use std::collections::HashMap;
 pub fn create_remapped_varbuilder<'a>(
     model_dir: &PathBuf,
@@ -767,7 +476,7 @@ pub fn create_realtime_remapped_varbuilder<'a>(
             hidden_size = Some(tensor.dim(1)?);
         }
 
-        // Convert BF16 weights to F32 to match Python's torch_dtype=torch.float32
+        // Convert BF16 weights to F32 for consistency
         let tensor = if tensor.dtype() == DType::BF16 {
             bf16_count += 1;
             tensor.to_dtype(DType::F32)?

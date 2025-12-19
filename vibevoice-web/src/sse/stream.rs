@@ -1,11 +1,11 @@
 use base64::Engine;
-use js_sys::{Object, Reflect, Uint8Array};
+use js_sys::{Reflect, Uint8Array};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{ReadableStreamDefaultReader, Request, RequestInit, RequestMode, Response};
 
-use crate::api::SynthesizeRequest;
+use crate::api::client::SynthesizeRequest;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HeaderEvent {
@@ -130,18 +130,32 @@ fn parse_sse_buffer(buffer: &str) -> (Vec<SseEvent>, String) {
     let mut remaining = String::new();
     let mut current_event_type = String::new();
     let mut current_data = String::new();
+    let mut in_data = false;
 
     for line in buffer.split('\n') {
         if line.starts_with("event:") {
             current_event_type = line[6..].trim().to_string();
+            in_data = false;
         } else if line.starts_with("data:") {
-            current_data = line[5..].trim().to_string();
-        } else if line.is_empty() && !current_event_type.is_empty() {
-            if let Some(event) = parse_sse_event(&current_event_type, &current_data) {
-                events.push(event);
+            // SSE spec: multiple data lines are joined with newlines
+            if !current_data.is_empty() {
+                current_data.push('\n');
             }
-            current_event_type.clear();
-            current_data.clear();
+            current_data.push_str(line[5..].trim());
+            in_data = true;
+        } else if line.is_empty() {
+            // Empty line = end of event
+            if !current_event_type.is_empty() {
+                if let Some(event) = parse_sse_event(&current_event_type, &current_data) {
+                    events.push(event);
+                }
+                current_event_type.clear();
+                current_data.clear();
+            }
+            in_data = false;
+        } else if in_data {
+            // Continuation of data line (split across network chunks)
+            current_data.push_str(line);
         }
     }
 
@@ -181,13 +195,13 @@ where
     let body_json =
         serde_json::to_string(&request_body).map_err(|e| format!("Serialize error: {}", e))?;
 
-    let mut opts = RequestInit::new();
-    opts.method("POST");
-    opts.mode(RequestMode::Cors);
-    opts.body(Some(&JsValue::from_str(&body_json)));
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::Cors);
+    opts.set_body(&JsValue::from_str(&body_json));
 
-    let request =
-        Request::new_with_str_and_init(&url, &opts).map_err(|e| format!("Request error: {:?}", e))?;
+    let request = Request::new_with_str_and_init(&url, &opts)
+        .map_err(|e| format!("Request error: {:?}", e))?;
     request
         .headers()
         .set("Content-Type", "application/json")
@@ -228,8 +242,8 @@ where
             break;
         }
 
-        let value = Reflect::get(&result, &JsValue::from_str("value"))
-            .map_err(|_| "Get value error")?;
+        let value =
+            Reflect::get(&result, &JsValue::from_str("value")).map_err(|_| "Get value error")?;
 
         if !value.is_undefined() {
             let uint8_array: Uint8Array = value.dyn_into().map_err(|_| "Uint8Array cast error")?;
@@ -257,14 +271,4 @@ where
     }
 
     Ok(())
-}
-
-pub fn pcm_to_float32(pcm_bytes: &[u8]) -> Vec<f32> {
-    pcm_bytes
-        .chunks_exact(2)
-        .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            sample as f32 / 32768.0
-        })
-        .collect()
 }

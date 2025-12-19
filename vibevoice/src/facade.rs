@@ -1,15 +1,10 @@
 //! High-level VibeVoice API for text-to-speech synthesis.
 
 use crate::{
-    AudioData, Result, VibeVoiceError,
-    model::VibeVoiceModel,
-    processor::VibeVoiceProcessor,
-    realtime::{VibeVoiceRealtimeModel, VoiceCache},
-    utils::{
+    AudioData, Result, VibeVoiceError, model::VibeVoiceModel, processor::VibeVoiceProcessor, pytorch_rng::set_all_seeds, realtime::{model::VibeVoiceRealtimeModel, voice_cache::VoiceCache}, utils::{
         create_remapped_varbuilder, download_model_files, download_realtime_model_files,
-        get_device, resolve_voice_path, set_all_seeds,
-    },
-    voice_mapper::{VoiceMapper, parse_txt_script},
+        get_device, resolve_voice_path,
+    }, voice_mapper::{VoiceMapper, parse_txt_script}
 };
 use candle_core::{Device as CandleDevice, Tensor};
 use std::path::{Path, PathBuf};
@@ -487,7 +482,14 @@ impl VibeVoice {
             model
                 .generate(text, &voice_cache, move |chunk| {
                     step += 1;
-                    let audio_chunk = AudioData::from_tensor(chunk, 24000).ok();
+                    // Convert chunk to AudioData - log errors but don't fail generation
+                    let audio_chunk = match AudioData::from_tensor(chunk, 24000) {
+                        Ok(data) => Some(data),
+                        Err(e) => {
+                            tracing::error!("Chunk {} conversion failed: {}", step, e);
+                            None
+                        }
+                    };
                     cb(Progress {
                         step,
                         total_steps: None,

@@ -510,14 +510,6 @@ impl DualSplitLLM {
 
     // ==================== KV Cache Management ====================
 
-    /// Clear KV caches for all 4 model components.
-    pub fn clear_kv_caches(&mut self) {
-        self.pos_language_model.clear_kv_cache();
-        self.neg_language_model.clear_kv_cache();
-        self.pos_tts_language_model.clear_kv_cache();
-        self.neg_tts_language_model.clear_kv_cache();
-    }
-
     /// Extract KV caches from all 4 model components.
     pub fn extract_kv_caches(&self) -> DualKvCaches {
         DualKvCaches {
@@ -526,16 +518,6 @@ impl DualSplitLLM {
             neg_lm: self.neg_language_model.extract_kv_cache(),
             neg_tts_lm: self.neg_tts_language_model.extract_kv_cache(),
         }
-    }
-
-    /// Restore KV caches to all 4 model components.
-    pub fn restore_kv_caches(&mut self, caches: DualKvCaches) {
-        self.pos_language_model.restore_kv_cache(caches.pos_lm);
-        self.pos_tts_language_model
-            .restore_kv_cache(caches.pos_tts_lm);
-        self.neg_language_model.restore_kv_cache(caches.neg_lm);
-        self.neg_tts_language_model
-            .restore_kv_cache(caches.neg_tts_lm);
     }
 
     /// Restore KV caches from a VoiceCache.
@@ -574,18 +556,6 @@ impl DualSplitLLM {
                 }
             }
         }
-    }
-
-    // ==================== Accessors ====================
-
-    /// Get hidden size.
-    pub fn hidden_size(&self) -> usize {
-        self.hidden_size
-    }
-
-    /// Get device.
-    pub fn device(&self) -> &Device {
-        &self.device
     }
 }
 

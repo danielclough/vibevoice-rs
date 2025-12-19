@@ -82,7 +82,7 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
         println!();
         println!("Options:");
         println!("  -o, --output <FILE>  Output path (default: cloned_output.wav)");
-        println!("  --cfg-scale <FLOAT>  CFG scale (default: 1.3)");
+        println!("  --cfg_scale <FLOAT>  CFG scale (default: 1.3)");
         println!("  --seed <INT>         Random seed (default: 524242)");
         println!("  --tracing            Enable detailed logging to file");
         println!("  --restore_rng        Restore RNG after voice embedding (may help some voices)");
@@ -110,7 +110,7 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
                 output_path = args.get(i + 1).cloned().unwrap_or(output_path);
                 i += 2;
             }
-            "--cfg-scale" => {
+            "--cfg_scale" => {
                 cfg_scale = args
                     .get(i + 1)
                     .and_then(|s| s.parse().ok())

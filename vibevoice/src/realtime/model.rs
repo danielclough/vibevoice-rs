@@ -35,12 +35,14 @@
 use crate::acoustic_connector::AcousticConnector;
 use crate::config::VAEDecoderConfig;
 use crate::diffusion::{DPMSolverPP, DiffusionHead};
-use crate::realtime::{
-    BinaryClassifier, DualSplitLLM, GenerationConfig, RealtimeConfig, TTS_SPEECH_WINDOW_SIZE,
-    VoiceCache, WindowedGenerator,
-};
+use crate::realtime::binary_classifier::BinaryClassifier;
+use crate::realtime::config::{RealtimeConfig, TTS_SPEECH_WINDOW_SIZE};
+use crate::realtime::generation::{GenerationConfig, WindowedGenerator};
+use crate::realtime::split_llm::DualSplitLLM;
+use crate::realtime::voice_cache::VoiceCache;
 use crate::streaming_cache::StreamingCache;
-use crate::utils::{create_realtime_remapped_varbuilder, seeded_randn, tensor_stats};
+use crate::utils::{create_realtime_remapped_varbuilder, tensor_stats};
+use crate::pytorch_rng::seeded_randn;
 use crate::vae_decoder::VAEDecoder;
 
 use anyhow::{Result, anyhow};
@@ -48,6 +50,16 @@ use candle_core::{DType, Device, Tensor};
 use std::path::Path;
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
+
+/// Optimal number of diffusion steps for the realtime model.
+/// The model is specifically tuned for 5 steps - fewer produces artifacts,
+/// more provides diminishing returns with increased latency.
+pub const REALTIME_DIFFUSION_STEPS: usize = 5;
+
+/// CFG (Classifier-Free Guidance) scale for the realtime model.
+/// This value controls the trade-off between audio quality and diversity.
+/// 1.5 is the optimal value for natural-sounding speech.
+pub const REALTIME_CFG_SCALE: f32 = 1.5;
 
 /// VibeVoice Realtime streaming model.
 ///
@@ -185,9 +197,8 @@ impl VibeVoiceRealtimeModel {
             VAEDecoderConfig::from_acoustic_config(&config.acoustic_tokenizer_config),
         )?;
 
-        // DPM-Solver with 5 steps for realtime
-        let num_diffusion_steps = config.diffusion_head_config.ddpm_num_inference_steps;
-        let solver = DPMSolverPP::new(num_diffusion_steps);
+        // DPM-Solver++ with optimal steps for realtime
+        let solver = DPMSolverPP::new(REALTIME_DIFFUSION_STEPS);
 
         // Load normalization factors
         let speech_scaling_factor = vb
@@ -279,9 +290,9 @@ impl VibeVoiceRealtimeModel {
 
         info!("Generating speech for {} text tokens", text_len);
 
-        // Create generator
+        // Create generator with optimal realtime settings
         let gen_config = GenerationConfig {
-            cfg_scale: 1.5,
+            cfg_scale: REALTIME_CFG_SCALE,
             num_diffusion_steps: self.solver.num_steps,
             speech_scaling_factor: self.speech_scaling_factor,
             speech_bias_factor: self.speech_bias_factor,
@@ -291,7 +302,10 @@ impl VibeVoiceRealtimeModel {
         generator.initialize_from_cache(voice_cache, &mut self.dual_split_llm)?;
 
         // Split text into windows
-        let windows = crate::realtime::generation::text_windows(&tts_text_ids, 5)?;
+        let windows = crate::realtime::generation::text_windows(
+            &tts_text_ids,
+            crate::realtime::config::TTS_TEXT_WINDOW_SIZE,
+        )?;
         let num_windows = windows.len();
         let mut audio_chunks = Vec::new();
         let mut acoustic_cache = StreamingCache::new(self.device.clone());
@@ -418,7 +432,13 @@ impl VibeVoiceRealtimeModel {
                 // Update generator state (both positive and negative paths)
                 generator.update_after_speech_token(&acoustic_embed, &mut self.dual_split_llm)?;
 
-                // Check EOS
+                // Check EOS with probability logging (debug level only)
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let eos_prob = self.eos_classifier.get_probability(&generator.get_positive_condition()?)?;
+                    if total_speech_tokens < 10 || total_speech_tokens % 50 == 0 {
+                        debug!("EOS probability at token {}: {:.4}", total_speech_tokens, eos_prob);
+                    }
+                }
                 if generator.check_eos(&self.eos_classifier)? {
                     debug!(
                         "EOS detected at window {}, speech token {}",
@@ -457,7 +477,7 @@ impl VibeVoiceRealtimeModel {
         let latent_size = self.config.acoustic_vae_dim;
         let num_steps = self.solver.num_steps;
         let num_train_timesteps = self.config.diffusion_head_config.ddpm_num_steps;
-        let cfg_scale = 1.5f32;
+        let cfg_scale = REALTIME_CFG_SCALE;
 
         // Log diffusion config for first token
         if log_first_token {
@@ -514,7 +534,7 @@ impl VibeVoiceRealtimeModel {
             info!("🔍 [DIFFUSION] initial_noise: {}", tensor_stats(&speech));
         }
 
-        // Concatenate conditions
+        // Concatenate conditions (already in model dtype from generator)
         let conditions = Tensor::cat(&[condition, neg_condition], 0)?.contiguous()?;
 
         // Multistep solver state
@@ -659,16 +679,6 @@ impl VibeVoiceRealtimeModel {
         }
 
         Ok(final_output)
-    }
-
-    /// Get the model configuration.
-    pub fn config(&self) -> &RealtimeConfig {
-        &self.config
-    }
-
-    /// Get the number of diffusion steps.
-    pub fn num_diffusion_steps(&self) -> usize {
-        self.solver.num_steps
     }
 
     /// Set the number of diffusion steps.

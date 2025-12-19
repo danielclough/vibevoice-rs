@@ -2,9 +2,15 @@ use gloo_storage::{LocalStorage, Storage};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use crate::api::{fetch_voices, synthesize_json, VoicesResponse};
-use crate::components::*;
-use crate::sse::{start_streaming, SseEvent, StreamingState};
+use crate::api::client::{fetch_voices, synthesize_json};
+use crate::components::audio_player::AudioPlayer;
+use crate::components::model_selector::{Model, ModelSelector};
+use crate::components::progress::Progress;
+use crate::components::server_config::ServerConfig;
+use crate::components::synth_button::SynthButton;
+use crate::components::text_input::TextInput;
+use crate::components::voice_selector::VoiceSelector;
+use crate::sse::stream::{start_streaming, SseEvent, StreamingState};
 
 const STORAGE_SERVER_URL: &str = "vibevoice.server_url";
 const STORAGE_MODEL: &str = "vibevoice.model";

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["vibevoice", "vibevoice-cli", "vibevoice-server", "vibevoice-web"]
+members = ["vibevoice", "vibevoice-cli", "vibevoice-server", "vibevoice-web", "vibevoice-tauri"]
 
 [workspace.package]
 version = "0.1.0"

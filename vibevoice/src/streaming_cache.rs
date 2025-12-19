@@ -55,11 +55,6 @@ impl StreamingCache {
         Ok(())
     }
 
-    /// Clear all cached states
-    pub fn clear(&mut self) {
-        self.cache.clear();
-    }
-
     /// Reset all cached states to zero (matching Python's set_to_zero)
     /// Keeps cache structure but zeros tensor values
     /// This is used when SPEECH_END is encountered to prepare for potential continuation
@@ -71,16 +66,6 @@ impl StreamingCache {
             }
         }
         // Note: Do NOT reset tokens_processed - Python doesn't reset its counter
-    }
-
-    /// Clear cached state for a specific layer
-    pub fn clear_layer(&mut self, layer_id: &str) {
-        self.cache.remove(layer_id);
-    }
-
-    /// Get the device
-    pub fn device(&self) -> &Device {
-        &self.device
     }
 
     /// Get the number of cache entries (for diagnostics)

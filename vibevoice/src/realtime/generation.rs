@@ -26,17 +26,12 @@
 //!
 //! From `modeling_vibevoice_streaming_inference.py:525-704`
 
-use crate::realtime::{
-    BinaryClassifier, DualSplitLLM, RealtimeConfig, TTS_SPEECH_WINDOW_SIZE, TTS_TEXT_WINDOW_SIZE,
-    VoiceCache,
-};
-use crate::streaming_cache::StreamingCache;
+use crate::{realtime::{binary_classifier::BinaryClassifier, config::{RealtimeConfig}, split_llm::DualSplitLLM, voice_cache::VoiceCache}, streaming_cache::StreamingCache};
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use tracing::debug;
 
 /// Configuration for the generation process.
-#[derive(Debug, Clone)]
 pub struct GenerationConfig {
     /// CFG scale for classifier-free guidance (default: 1.5)
     pub cfg_scale: f32,
@@ -117,15 +112,6 @@ impl GenerationState {
             finished: false,
         })
     }
-}
-
-/// Result of generating a single speech token.
-#[derive(Debug)]
-pub struct SpeechTokenResult {
-    /// The generated speech latent (before VAE decode)
-    pub latent: Tensor,
-    /// Whether EOS was detected after this token
-    pub eos_detected: bool,
 }
 
 /// Windowed generator for streaming TTS.
@@ -380,25 +366,9 @@ impl WindowedGenerator {
         Ok(should_stop)
     }
 
-    /// Get the current TTS LM cache position (total sequence length).
-    pub fn tts_lm_cache_position(&self) -> usize {
-        self.state.tts_lm_cache_position
-    }
-
-    /// Get the current LM cache position (text-only sequence length).
-    pub fn lm_cache_position(&self) -> usize {
-        self.state.lm_cache_position
-    }
-
     /// Check if generation has finished.
     pub fn is_finished(&self) -> bool {
         self.state.finished
-    }
-
-    /// Reset the generator for a new utterance (keeps voice cache).
-    pub fn reset(&mut self) {
-        self.state.finished = false;
-        self.state.acoustic_cache = StreamingCache::new(self.device.clone());
     }
 }
 
@@ -427,15 +397,6 @@ pub fn text_windows(text_ids: &Tensor, window_size: usize) -> Result<Vec<Tensor>
     Ok(windows)
 }
 
-/// Compute the number of text windows for a given text length.
-pub fn num_text_windows(text_len: usize) -> usize {
-    text_len.div_ceil(TTS_TEXT_WINDOW_SIZE)
-}
-
-/// Compute the expected number of speech tokens (before EOS).
-pub fn max_speech_tokens(text_len: usize) -> usize {
-    num_text_windows(text_len) * TTS_SPEECH_WINDOW_SIZE
-}
 
 #[cfg(test)]
 mod tests {
@@ -475,24 +436,6 @@ mod tests {
         let windows = text_windows(&text_ids, 5).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].dim(1).unwrap(), 3);
-    }
-
-    #[test]
-    fn test_num_text_windows() {
-        assert_eq!(num_text_windows(5), 1);
-        assert_eq!(num_text_windows(10), 2);
-        assert_eq!(num_text_windows(12), 3);
-        assert_eq!(num_text_windows(3), 1);
-    }
-
-    #[test]
-    fn test_max_speech_tokens() {
-        // 1 window * 6 speech tokens
-        assert_eq!(max_speech_tokens(5), 6);
-        // 2 windows * 6 speech tokens
-        assert_eq!(max_speech_tokens(10), 12);
-        // 3 windows * 6 speech tokens
-        assert_eq!(max_speech_tokens(12), 18);
     }
 
     #[test]

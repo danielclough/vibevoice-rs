@@ -13,7 +13,7 @@ use crate::{
     diffusion::{DPMSolverPP, DiffusionHead},
     semantic_tokenizer::SemanticTokenizer,
     speech_connector::SpeechConnector,
-    utils::{restore_rng_state, save_rng_state, seeded_randn},
+    pytorch_rng::{restore_rng_state, save_rng_state, seeded_randn},
     vae_decoder::VAEDecoder,
     vae_encoder::VAEEncoder,
 };
@@ -356,27 +356,6 @@ impl VibeVoiceModel {
         })
     }
 
-    /// Load debug diffusion noise from a Python-exported .npz file
-    /// This allows testing the DPM solver with identical inputs as Python
-    pub fn load_debug_diffusion_noise(&mut self, npz_path: &std::path::Path) -> Result<()> {
-        use crate::test_helpers::{Checkpoint, ToTensor};
-
-        info!("🔧 Loading debug diffusion noise from {:?}", npz_path);
-        let mut checkpoint = Checkpoint::open(npz_path)?;
-
-        // Load 2D noise array [2, 64] and convert to tensor
-        let noise_array = checkpoint.load_array2("initial_noise")?;
-        let noise = noise_array.to_tensor(&self.device)?;
-
-        info!("   Noise shape: {:?}", noise.dims());
-        let flat: Vec<f32> = noise.flatten_all()?.to_vec1()?;
-        info!("   First 10 values: {:?}", &flat[..10.min(flat.len())]);
-        self.debug_diffusion_noise = Some(noise);
-        info!("✓ Debug diffusion noise loaded");
-
-        Ok(())
-    }
-
     /// Set the classifier-free guidance scale
     pub fn set_cfg_scale(&mut self, cfg_scale: f32) {
         self.cfg_scale = cfg_scale;
@@ -405,37 +384,6 @@ impl VibeVoiceModel {
 
     pub fn set_ddpm_inference_steps(&mut self, num_steps: usize) {
         self.solver.num_steps = num_steps;
-    }
-
-    /// Get the number of diffusion steps.
-    pub fn num_diffusion_steps(&self) -> usize {
-        self.solver.num_steps
-    }
-
-    /// Test-only: Run diffusion sampler with provided conditions
-    /// This allows direct testing of the diffusion process in isolation
-    /// condition: [batch, hidden_size] - positive LLM hidden state
-    /// neg_condition: [batch, hidden_size] - negative/CFG hidden state
-    /// Returns: diffusion_latent [batch, 64]
-    pub fn sample_diffusion(&self, condition: &Tensor, neg_condition: &Tensor) -> Result<Tensor> {
-        self.sample_dpm_solver(
-            condition,
-            neg_condition,
-            self.solver.num_steps,
-            self.cfg_scale,
-        )
-    }
-
-    /// Encode audio to latent representation using VAE encoder
-    /// Input: audio [batch, 1, samples] at 24kHz
-    /// Output: latents [batch, 64, vae_tokens]
-    pub fn encode_voice(&self, audio: &Tensor) -> Result<Tensor> {
-        self.vae_encoder.encode(audio)
-    }
-
-    /// Test-only: Get reference to diffusion head for step-by-step testing
-    pub fn get_diffusion_head(&self) -> &crate::diffusion::DiffusionHead {
-        &self.diffusion_head
     }
 
     /// Get token embeddings from input_ids
@@ -775,14 +723,6 @@ impl VibeVoiceModel {
         }
     }
 
-    pub fn tokenize(&self, text: &str) -> Result<Tensor> {
-        let encoding = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(|e| AnyErr::msg(format!("Tokenization error: {}", e)))?;
-        let ids: Vec<u32> = encoding.get_ids().to_vec();
-        Ok(Tensor::new(ids.as_slice(), &self.device)?.unsqueeze(0)?)
-    }
     /// DPM-Solver++ sampling matching Python's DPMSolverMultistepScheduler
     /// Reference: VibeVoice/vibevoice/schedule/dpm_solver.py
     /// Key matching points:
@@ -1197,106 +1137,6 @@ impl VibeVoiceModel {
             max_new_tokens,
             chunk_callback,
         )
-    }
-
-    /// Generate speech with pre-computed voice embeddings (bypasses RNG)
-    ///
-    /// This method is useful for debugging/testing where you want to inject
-    /// voice embeddings computed by Python to isolate whether differences
-    /// are in embedding generation or downstream processing.
-    ///
-    /// # Arguments
-    /// * `input_ids` - Processed input token IDs [batch, seq_len]
-    /// * `voice_embeds` - Pre-computed voice embeddings [total_tokens, hidden_size]
-    /// * `speech_input_mask` - Mask [batch, seq_len] marking positions for voice injection
-    /// * `attention_mask` - Optional attention mask [batch, seq_len]
-    /// * `max_new_tokens` - Maximum tokens to generate
-    /// * `chunk_callback` - Optional callback for streaming audio chunks
-    ///
-    /// # Returns
-    /// Vec<Tensor> containing all generated audio chunks
-    pub fn generate_with_precomputed_embeds<F>(
-        &mut self,
-        input_ids: &Tensor,
-        voice_embeds: &Tensor,
-        speech_input_mask: Option<&Tensor>,
-        attention_mask: Option<&Tensor>,
-        max_new_tokens: Option<usize>,
-        chunk_callback: Option<F>,
-    ) -> Result<Vec<Tensor>>
-    where
-        F: FnMut(&Tensor) -> Result<()>,
-    {
-        debug!("🔧 Using pre-computed voice embeddings (bypassing RNG)");
-        debug!("   voice_embeds shape: {:?}", voice_embeds.dims());
-
-        self.generate_autoregressive_streaming(
-            input_ids,
-            Some(voice_embeds),
-            speech_input_mask,
-            attention_mask,
-            max_new_tokens,
-            chunk_callback,
-        )
-    }
-
-    /// Generate speech with voice cloning support
-    /// Supports both streaming and non-streaming modes based on callback presence
-    ///
-    /// NOTE: This is a simplified API that doesn't support multi-speaker with speech_masks.
-    /// For multi-speaker synthesis, use generate_processed with ProcessorOutput.
-    ///
-    /// # Arguments
-    /// * `text` - Input text to synthesize
-    /// * `voice_audio` - Optional voice sample [batch, 1, samples] at 24kHz (single speaker)
-    /// * `speech_input_mask` - Optional mask [batch, seq_len] marking positions for voice injection
-    /// * `max_new_tokens` - Maximum tokens to generate
-    /// * `is_prefill` - If true, use voice embeddings for cloning
-    /// * `chunk_callback` - Optional callback for streaming audio chunks
-    ///
-    /// # Returns
-    /// Vec<Tensor> containing all generated audio chunks
-    pub fn generate<F>(
-        &mut self,
-        text: &str,
-        voice_audio: Option<&Tensor>,
-        speech_input_mask: Option<&Tensor>,
-        max_new_tokens: Option<usize>,
-        is_prefill: bool,
-        chunk_callback: Option<F>,
-    ) -> Result<Vec<Tensor>>
-    where
-        F: FnMut(&Tensor) -> Result<()>,
-    {
-        let is_streaming = chunk_callback.is_some();
-        debug!(
-            "🎵 {} Audio Generation",
-            if is_streaming { "Streaming" } else { "Batch" }
-        );
-
-        // Process voice if provided and is_prefill is true
-        // Note: speech_masks is None here - this API is for single-speaker only
-        let voice_embeds = if is_prefill && voice_audio.is_some() {
-            Some(self.process_voice_for_injection(voice_audio.unwrap(), None)?)
-        } else {
-            None
-        };
-
-        // Tokenize the input text
-        let input_ids = self.tokenize(text)?;
-        let attention_mask = Tensor::ones(input_ids.dims(), candle_core::DType::U32, &self.device)?;
-
-        // Generate tokens and audio chunks
-        let audio_chunks = self.generate_autoregressive_streaming(
-            &input_ids,
-            voice_embeds.as_ref(),
-            speech_input_mask,
-            Some(&attention_mask),
-            max_new_tokens,
-            chunk_callback,
-        )?;
-
-        Ok(audio_chunks)
     }
 
     /// Internal streaming generation method

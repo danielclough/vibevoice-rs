@@ -47,7 +47,26 @@
 //! - PyTorch source: `aten/src/ATen/core/TransformationHelper.h`
 //! - PyTorch source: `aten/src/ATen/core/DistributionsHelper.h`
 
-use rand_mt::Mt;
+use candle_core::{Device, Tensor};
+use rand_mt::Mt; // Mersenne Twister 32-bit (MT19937) to match Python's torch.Generator
+// IMPORTANT: Must use Mt (32-bit), NOT Mt64 (64-bit) - they produce different sequences!
+use std::sync::Mutex;
+use anyhow::{Error as AnyErr, Result};
+use tracing::{debug, info};
+
+/// Global CPU RNG state for deterministic random generation across all functions.
+/// Includes both the MT19937 generator AND the Box-Muller cache for PyTorch parity.
+///
+/// IMPORTANT: Python's torch.manual_seed() uses MT19937 (32-bit), NOT MT19937-64!
+/// This MUST be at module level to be shared between set_all_seeds() and seeded_randn().
+struct GlobalRngState {
+    /// Mersenne Twister 32-bit generator (identical to PyTorch's)
+    rng: Mt,
+    /// PyTorch-compatible Box-Muller with caching
+    normal: PyTorchNormal,
+}
+
+static GLOBAL_CPU_RNG: Mutex<Option<GlobalRngState>> = Mutex::new(None);
 
 /// PyTorch-compatible normal distribution generator.
 ///
@@ -81,16 +100,6 @@ impl PyTorchNormal {
             cached_value: None,
             u32_consumed: 0,
         }
-    }
-
-    /// Reset the cache and consumption counter.
-    ///
-    /// Call this when reseeding the RNG to ensure the cache doesn't contain
-    /// stale values from a previous seed.
-    #[inline]
-    pub fn reset_cache(&mut self) {
-        self.cached_value = None;
-        self.u32_consumed = 0;
     }
 
     /// Get the total number of u32 values consumed from MT19937.
@@ -191,14 +200,6 @@ impl PyTorchNormal {
     #[inline]
     pub fn sample_scaled(&mut self, rng: &mut Mt, mean: f32, std: f32) -> f32 {
         self.sample(rng) * std + mean
-    }
-
-    /// Check if there's a cached value waiting.
-    ///
-    /// Useful for debugging and testing.
-    #[inline]
-    pub fn has_cached_value(&self) -> bool {
-        self.cached_value.is_some()
     }
 
     /// Convert a single MT19937 u32 to a 24-bit uniform float [0, 1).
@@ -358,41 +359,6 @@ mod tests {
     }
 
     #[test]
-    fn test_caching_behavior() {
-        let mut rng = Mt::new(524242);
-        let mut normal = PyTorchNormal::new();
-
-        // Initially no cached value
-        assert!(!normal.has_cached_value());
-
-        // First sample generates pair, caches one
-        let _v1 = normal.sample(&mut rng);
-        assert!(normal.has_cached_value());
-
-        // Second sample returns cache, clears it
-        let _v2 = normal.sample(&mut rng);
-        assert!(!normal.has_cached_value());
-
-        // Third sample generates new pair
-        let _v3 = normal.sample(&mut rng);
-        assert!(normal.has_cached_value());
-    }
-
-    #[test]
-    fn test_reset_cache() {
-        let mut rng = Mt::new(524242);
-        let mut normal = PyTorchNormal::new();
-
-        // Generate a value to populate cache
-        let _v1 = normal.sample(&mut rng);
-        assert!(normal.has_cached_value());
-
-        // Reset should clear it
-        normal.reset_cache();
-        assert!(!normal.has_cached_value());
-    }
-
-    #[test]
     fn test_determinism() {
         // Same seed should produce same sequence
         let mut rng1 = Mt::new(524242);
@@ -454,5 +420,189 @@ mod tests {
         let scaled = normal2.sample_scaled(&mut rng2, 5.0, 2.0);
 
         assert_eq!(scaled, raw * 2.0 + 5.0);
+    }
+}
+
+
+/// Set all random seeds for full reproducibility across CPU, CUDA, and Metal.
+/// This function must be called BEFORE any model loading to ensure deterministic behavior.
+///
+/// Uses Mersenne Twister 32-bit (MT19937) to match Python's torch.Generator, and resets
+/// the Box-Muller cache to ensure the same sequence as a fresh PyTorch session.
+///
+/// # Important
+///
+/// This function resets BOTH the MT19937 state AND the Box-Muller cache. If you only
+/// reset the MT19937 without clearing the cache, you'll get a different sequence than
+/// PyTorch because the cached second value from the previous Box-Muller pair would
+/// be returned first.
+pub fn set_all_seeds(seed: u64, device: &Device) -> Result<()> {
+    // Set device seed (only for CUDA/Metal, CPU doesn't support set_seed)
+    if !matches!(device, Device::Cpu) {
+        device.set_seed(seed)?;
+    }
+
+    // Initialize the global RNG state with both MT19937 AND a fresh Box-Muller cache
+    // NOTE: PyTorch internally uses MT19937 (32-bit), so we truncate the seed to u32
+    // This matches Python's behavior: torch.manual_seed(654321) uses the lower 32 bits
+    let mut rng_guard = GLOBAL_CPU_RNG
+        .lock()
+        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
+    *rng_guard = Some(GlobalRngState {
+        rng: Mt::new(seed as u32),
+        normal: PyTorchNormal::new(), // Fresh cache - critical for sequence alignment
+    });
+
+    debug!(
+        "🎲 All random seeds set to {} (device + MT19937-32bit + Box-Muller cache)",
+        seed
+    );
+    Ok(())
+}
+
+/// Saved RNG state for later restoration.
+/// This allows generating random values without permanently advancing the global RNG.
+#[derive(Clone)]
+pub struct SavedRngState {
+    rng: Mt,
+    normal: PyTorchNormal,
+}
+
+/// Save the current global RNG state for later restoration.
+///
+/// This is useful when you want to generate random values for one purpose
+/// (e.g., voice embedding) without affecting the RNG position for another
+/// purpose (e.g., diffusion noise).
+///
+/// # Example
+/// ```ignore
+/// let saved = save_rng_state()?;
+/// // Generate some random values...
+/// seeded_randn(...)?;
+/// // Restore to original position
+/// restore_rng_state(saved)?;
+/// // Next seeded_randn will use the same position as before
+/// ```
+pub fn save_rng_state() -> Result<SavedRngState> {
+    let rng_guard = GLOBAL_CPU_RNG
+        .lock()
+        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
+
+    let state = rng_guard.as_ref().ok_or_else(|| {
+        AnyErr::msg("RNG not initialized. Call set_all_seeds() first.")
+    })?;
+
+    Ok(SavedRngState {
+        rng: state.rng.clone(),
+        normal: state.normal.clone(),
+    })
+}
+
+/// Restore a previously saved RNG state.
+///
+/// This resets the global RNG to the exact state it was in when save_rng_state() was called,
+/// including the MT19937 internal state and the Box-Muller cache.
+pub fn restore_rng_state(saved: SavedRngState) -> Result<()> {
+    let mut rng_guard = GLOBAL_CPU_RNG
+        .lock()
+        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
+
+    *rng_guard = Some(GlobalRngState {
+        rng: saved.rng,
+        normal: saved.normal,
+    });
+
+    Ok(())
+}
+
+/// Generate a seeded random normal tensor using PyTorch-compatible Box-Muller.
+///
+/// ALWAYS generates on CPU for true determinism, then transfers to target device.
+/// This ensures reproducible results across CPU, CUDA, and Metal.
+///
+/// # PyTorch Parity
+///
+/// This function automatically selects the correct algorithm based on tensor size:
+///
+/// - **Size < 16**: Uses scalar Box-Muller with 53-bit double-precision uniforms
+/// - **Size >= 16 (multiple of 16)**: Uses vectorized Box-Muller with 24-bit float uniforms
+///
+/// Both paths produce bit-identical results to PyTorch given the same seed.
+///
+/// # Important
+///
+/// For sizes >= 16 that aren't multiples of 16, this currently falls back to the
+/// scalar path. PyTorch's actual behavior for non-multiples is more complex and
+/// involves partial vectorized batches.
+pub fn seeded_randn(mean: f64, std: f64, shape: &[usize], device: &Device) -> Result<Tensor> {
+    // Always use the global CPU RNG for determinism
+    // GPU random generation (Tensor::randn on Metal/CUDA) may not respect seeds properly
+    let mut rng_guard = GLOBAL_CPU_RNG
+        .lock()
+        .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
+
+    if let Some(ref mut state) = *rng_guard {
+        let elem_count = shape.iter().product::<usize>();
+        let mean_f32 = mean as f32;
+        let std_f32 = std as f32;
+
+        // Log RNG state before generation (only when tracing is enabled)
+        let u32_before = if tracing::enabled!(tracing::Level::DEBUG) {
+            state.normal.u32_consumed()
+        } else {
+            0
+        };
+
+        let data = if elem_count >= 16 && elem_count % 16 == 0 {
+            // Vectorized path: use PyTorch's SIMD-style batch processing
+            // This matches torch.randn() for sizes that are multiples of 16
+            debug!(
+                "🎲 Using vectorized RNG path for {} elements ({} chunks of 16)",
+                elem_count,
+                elem_count / 16
+            );
+            state
+                .normal
+                .sample_vectorized_scaled(&mut state.rng, elem_count, mean_f32, std_f32)
+        } else {
+            // Scalar path for small sizes or non-multiples of 16
+            debug!("🎲 Using scalar RNG path for {} elements", elem_count);
+            let mut data = Vec::with_capacity(elem_count);
+            for _ in 0..elem_count {
+                data.push(
+                    state
+                        .normal
+                        .sample_scaled(&mut state.rng, mean_f32, std_f32),
+                );
+            }
+            data
+        };
+
+        // Log RNG state after generation (only when tracing is enabled)
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let u32_after = state.normal.u32_consumed();
+            info!(
+                "[RNG] randn({:?}): u32_consumed {} -> {} (delta={})",
+                shape,
+                u32_before,
+                u32_after,
+                u32_after - u32_before
+            );
+        }
+
+        // Create tensor on CPU first
+        let cpu_tensor = Tensor::from_vec(data, shape, &Device::Cpu)?;
+
+        // Transfer to target device if needed
+        if matches!(device, Device::Cpu) {
+            Ok(cpu_tensor)
+        } else {
+            Ok(cpu_tensor.to_device(device)?)
+        }
+    } else {
+        // RNG must be initialized - this is a programming error that would break parity
+        anyhow::bail!(
+            "Global CPU RNG not initialized! Call set_all_seeds() before generating random tensors."
+        );
     }
 }

@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use super::Model;
+use crate::components::model_selector::Model;
 
 #[component]
 pub fn VoiceSelector(

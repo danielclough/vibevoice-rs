@@ -62,8 +62,24 @@ pub struct CacheEntry {
 
 impl CacheEntry {
     /// Get the sequence length from the cache.
+    ///
+    /// Validates that last_hidden_state and KV cache have matching seq_len.
     pub fn seq_len(&self) -> Result<usize> {
-        Ok(self.last_hidden_state.dim(1)?)
+        let hidden_seq_len = self.last_hidden_state.dim(1)?;
+
+        // Validate KV cache seq_len matches (KV shape: [1, num_kv_heads, seq_len, head_dim])
+        if let Some((k, _v)) = self.past_key_values.first() {
+            let kv_seq_len = k.dim(2)?;
+            if kv_seq_len != hidden_seq_len {
+                return Err(anyhow!(
+                    "seq_len mismatch: last_hidden_state has {} but KV cache has {}. \
+                    This would cause RoPE position errors!",
+                    hidden_seq_len, kv_seq_len
+                ));
+            }
+        }
+
+        Ok(hidden_seq_len)
     }
 
     /// Get the number of layers in this cache.
@@ -132,11 +148,11 @@ impl VoiceCache {
         // Load all tensors from safetensors file
         let tensors = load(path, device)?;
 
-        // Load all 4 cache entries
-        let lm = Self::load_cache_entry(&tensors, "lm")?;
-        let tts_lm = Self::load_cache_entry(&tensors, "tts_lm")?;
-        let neg_lm = Self::load_cache_entry(&tensors, "neg_lm")?;
-        let neg_tts_lm = Self::load_cache_entry(&tensors, "neg_tts_lm")?;
+        // Load all 4 cache entries with reduced precision for numerical stability
+        let lm = Self::load_cache_entry(&tensors, "lm", device)?;
+        let tts_lm = Self::load_cache_entry(&tensors, "tts_lm", device)?;
+        let neg_lm = Self::load_cache_entry(&tensors, "neg_lm", device)?;
+        let neg_tts_lm = Self::load_cache_entry(&tensors, "neg_tts_lm", device)?;
 
         // Validate layer counts
         // LM should have 4 layers, TTS LM should have 20 layers
@@ -164,15 +180,18 @@ impl VoiceCache {
     }
 
     /// Load a single cache entry from the tensor map.
-    fn load_cache_entry(tensors: &HashMap<String, Tensor>, prefix: &str) -> Result<CacheEntry> {
+    fn load_cache_entry(tensors: &HashMap<String, Tensor>, prefix: &str, _device: &Device) -> Result<CacheEntry> {
         use candle_core::DType;
 
-        // Load last_hidden_state and convert to F32 to match model dtype
+        // Use F32 for all devices to avoid dtype mismatch issues
+        let target_dtype = DType::F32;
+
+        // Load last_hidden_state
         let hidden_key = format!("{}/last_hidden_state", prefix);
         let last_hidden_state = tensors
             .get(&hidden_key)
             .ok_or_else(|| anyhow!("Missing {} in voice cache", hidden_key))?
-            .to_dtype(DType::F32)?;
+            .to_dtype(target_dtype)?;
 
         // Load KV pairs until we run out
         let mut past_key_values = Vec::new();
@@ -184,8 +203,8 @@ impl VoiceCache {
 
             match (tensors.get(&key_path), tensors.get(&value_path)) {
                 (Some(k), Some(v)) => {
-                    // Convert KV tensors to F32 to match model dtype
-                    past_key_values.push((k.to_dtype(DType::F32)?, v.to_dtype(DType::F32)?));
+                    // Convert KV tensors to reduced precision
+                    past_key_values.push((k.to_dtype(target_dtype)?, v.to_dtype(target_dtype)?));
                     layer_idx += 1;
                 }
                 (None, None) => break,
@@ -244,25 +263,6 @@ impl VoiceCache {
             self.lm.seq_len()?,
             self.tts_lm.seq_len()?,
             self.neg_lm.seq_len()?,
-            self.neg_tts_lm.seq_len()?,
-        ))
-    }
-
-    /// Summary of the voice cache for debugging.
-    pub fn summary(&self) -> Result<String> {
-        Ok(format!(
-            "VoiceCache:\n\
-             - lm: {} layers, seq_len={}\n\
-             - tts_lm: {} layers, seq_len={}\n\
-             - neg_lm: {} layers, seq_len={}\n\
-             - neg_tts_lm: {} layers, seq_len={}",
-            self.lm.num_layers(),
-            self.lm.seq_len()?,
-            self.tts_lm.num_layers(),
-            self.tts_lm.seq_len()?,
-            self.neg_lm.num_layers(),
-            self.neg_lm.seq_len()?,
-            self.neg_tts_lm.num_layers(),
             self.neg_tts_lm.seq_len()?,
         ))
     }

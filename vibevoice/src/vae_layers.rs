@@ -445,29 +445,6 @@ impl SConvTranspose1d {
         })
     }
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Apply transposed convolution (Python line 557)
-        let mut y = self.convtr.forward(x)?;
-
-        // Calculate padding to remove (Python lines 563-568)
-        let (padding_left, padding_right) = if self.causal {
-            let padding_right = (self.padding_total as f64 * self.trim_right_ratio).ceil() as usize;
-            let padding_left = self.padding_total - padding_right;
-            (padding_left, padding_right)
-        } else {
-            let padding_right = self.padding_total / 2;
-            let padding_left = self.padding_total - padding_right;
-            (padding_left, padding_right)
-        };
-
-        // Remove padding (Python line 571)
-        if padding_left + padding_right > 0 {
-            y = unpad1d(&y, (padding_left, padding_right))?;
-        }
-
-        Ok(y)
-    }
-
     /// Forward pass with streaming cache support
     /// Matches Python's _forward_streaming method in modular_vibevoice_tokenizer.py:478
     pub fn forward_with_cache(
@@ -700,53 +677,6 @@ impl Block1D {
             ffn_gamma,
             drop_path,
         })
-    }
-
-    /// Forward pass matching Python Block1D.forward (lines 665-684)
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Mixer path (Python lines 667-672)
-        let residual = x;
-        let mut x = self.norm.forward(x)?;
-        x = self.mixer.forward(&x)?;
-
-        // Apply gamma scaling if present
-        if let Some(ref gamma) = self.gamma {
-            let gamma_expanded = gamma.reshape((1, gamma.dims()[0], 1))?;
-            x = x.broadcast_mul(&gamma_expanded)?;
-        }
-
-        // First residual connection with drop path
-        let mut x = if let Some(ref dp) = self.drop_path {
-            // Apply drop path if implemented
-            (residual + dp.broadcast_mul(&x)?)?
-        } else {
-            (residual + x)?
-        };
-
-        // FFN path (Python lines 674-682)
-        // Python updates residual = x here (line 675), then normalizes x (line 676)
-        let residual_ffn = x.clone(); // Save post-mixer result for FFN residual connection
-        x = self.ffn_norm.forward(&residual_ffn)?;
-
-        // Permute: b c t -> b t c for FFN (contiguous for CUDA compatibility)
-        x = x.transpose(1, 2)?.contiguous()?;
-        x = self.ffn.forward(&x)?;
-
-        // Permute back: b t c -> b c t (contiguous for CUDA compatibility)
-        x = x.transpose(1, 2)?.contiguous()?;
-
-        // Apply ffn_gamma scaling if present
-        if let Some(ref ffn_gamma) = self.ffn_gamma {
-            let ffn_gamma_expanded = ffn_gamma.reshape((1, ffn_gamma.dims()[0], 1))?;
-            x = x.broadcast_mul(&ffn_gamma_expanded)?;
-        }
-
-        // Second residual connection with drop path
-        if let Some(ref dp) = self.drop_path {
-            Ok((residual_ffn + dp.broadcast_mul(&x)?)?)
-        } else {
-            Ok((&residual_ffn + x)?)
-        }
     }
 
     /// Forward pass with streaming cache support for the mixer convolution

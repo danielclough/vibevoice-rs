@@ -93,7 +93,7 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
         println!("Options:");
         println!("  --voices-dir <DIR>      Directory containing voice samples");
         println!("  -o, --output <FILE>     Output path (default: dialogue_output.wav)");
-        println!("  --cfg-scale <FLOAT>     CFG scale (default: 1.3)");
+        println!("  --cfg_scale <FLOAT>     CFG scale (default: 1.3)");
         println!("  --seed <INT>            Random seed (default: 524242)");
         println!("  -h, --help              Show this help");
         println!();
@@ -129,7 +129,7 @@ fn parse_args(args: &[String]) -> Result<Config, &'static str> {
                 output_path = args.get(i + 1).cloned().unwrap_or(output_path);
                 i += 2;
             }
-            "--cfg-scale" => {
+            "--cfg_scale" => {
                 cfg_scale = args
                     .get(i + 1)
                     .and_then(|s| s.parse().ok())

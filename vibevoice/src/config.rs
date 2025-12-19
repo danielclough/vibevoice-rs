@@ -370,16 +370,4 @@ impl VAEDecoderConfig {
             ffn_expansion: 4,      // Python default
         }
     }
-
-    /// Calculate the number of channels at each stage
-    pub fn stage_channels(&self) -> Vec<usize> {
-        let num_stages = self.depths.len();
-        (0..num_stages)
-            .map(|i| self.n_filters * 2_usize.pow((num_stages - 1 - i) as u32))
-            .collect()
-    }
-    /// Calculate total upsampling factor
-    pub fn hop_length(&self) -> usize {
-        self.ratios.iter().product()
-    }
 }

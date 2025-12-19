@@ -188,9 +188,9 @@ vibevoice --model realtime --voice-cache output.safetensors --text "Hello world"
 | `--voice`, `-v` | - | Voice sample WAV file for cloning |
 | `--script`, `-s` | - | Script file for multi-speaker synthesis |
 | `--voices-dir` | - | Directory containing voice samples |
-| `--cfg-scale` | `1.3` | CFG scale for diffusion |
+| `--cfg_scale` | `1.3` | CFG scale for diffusion |
 | `--seed` | `524242` | Random seed for reproducibility |
-| `--restore-rng` | `false` | Restore RNG after voice embedding (may help some voices) |
+| `--restore_rng` | `false` | Restore RNG after voice embedding (may help some voices) |
 | `--steps` | `5` | Diffusion steps (realtime model only) |
 | `--tracing` | `false` | Enable logging |
 

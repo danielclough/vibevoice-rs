@@ -47,10 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Hello! This is the realtime streaming model. It generates audio chunk by chunk for low latency applications."
     );
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // Initialize tracing - use file logging if --tracing flag is present
+    if args.iter().any(|a| a == "--tracing") {
+        vibevoice::init_file_logging("streaming");
+    }
 
     println!("Loading realtime model...");
     let load_start = Instant::now();

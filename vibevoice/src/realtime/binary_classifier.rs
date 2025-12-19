@@ -148,6 +148,7 @@ impl BinaryClassifier {
     /// # Returns
     ///
     /// Probability in range [0, 1]
+    #[allow(dead_code)]
     pub fn get_probability(&self, hidden_state: &Tensor) -> Result<f32> {
         let x = if hidden_state.dims().len() == 1 {
             hidden_state.unsqueeze(0)?

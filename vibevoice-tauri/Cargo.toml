@@ -1,0 +1,62 @@
+[package]
+name = "vibevoice-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "vibevoice_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Workspace dependencies
+vibevoice-server = { path = "../vibevoice-server" }
+vibevoice = { path = "../vibevoice" }
+
+# Tauri v2
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "sync"] }
+tower-http = { version = "0.6", features = ["cors"] }
+axum = "0.8"
+
+# Config and serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+directories = "5"
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+
+# GPU features (mirror vibevoice-server)
+cuda = ["vibevoice-server/cuda", "vibevoice/cuda"]
+cudnn = ["vibevoice-server/cudnn", "vibevoice/cudnn"]
+metal = ["vibevoice-server/metal", "vibevoice/metal"]
+flash-attn = ["vibevoice-server/flash-attn", "vibevoice/flash-attn"]
+accelerate = ["vibevoice-server/accelerate", "vibevoice/accelerate"]
+mkl = ["vibevoice-server/mkl", "vibevoice/mkl"]
+gpu = ["vibevoice-server/gpu", "vibevoice/gpu"]
+
+# Platform convenience features
+macos = ["metal", "accelerate"]
+linux-gpu = ["cuda", "cudnn", "flash-attn"]
+windows-gpu = ["cuda", "cudnn"]
+
+# Development features
+devtools = ["tauri/devtools"]

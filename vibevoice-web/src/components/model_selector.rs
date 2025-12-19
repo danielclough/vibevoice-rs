@@ -1,5 +1,4 @@
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Model {
