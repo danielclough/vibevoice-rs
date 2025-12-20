@@ -1,5 +1,7 @@
 # VibeVoice-RS
 
+![VibeVoice-RS](./VibeVoice-RS_header.png)
+
 Rust implementation of VibeVoice text-to-speech with voice cloning and multi-speaker synthesis.
 
 ## Features
