@@ -3,11 +3,6 @@
 /output
 dist/
 
-# Allowed
-!**/README.md
-!**/.gitignore
-!voices/*.wav
-
 # Debug outputs
 debug/
 
@@ -15,3 +10,8 @@ debug/
 *.md
 .*
 *.wav
+
+# Allowed
+!**/README.md
+!**/.gitignore
+!voices/*.wav

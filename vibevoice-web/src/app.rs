@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api::client::{fetch_voices, synthesize_json};
+use crate::tauri;
 use crate::components::audio_player::AudioPlayer;
 use crate::components::model_selector::{Model, ModelSelector};
 use crate::components::progress::Progress;
@@ -71,11 +72,19 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // Initial fetch
-    {
-        let url = server_url.get_untracked();
-        fetch_voices_action(url);
-    }
+    // On mount: fetch server URL from Tauri if available, then fetch voices
+    spawn_local(async move {
+        // Try to get server URL from Tauri config
+        if let Some(tauri_url) = tauri::get_server_url().await {
+            server_url.set(tauri_url.clone());
+            let _ = LocalStorage::set(STORAGE_SERVER_URL, &tauri_url);
+            fetch_voices_action(tauri_url);
+        } else {
+            // Fall back to current value (from LocalStorage or default)
+            let url = server_url.get_untracked();
+            fetch_voices_action(url);
+        }
+    });
 
     // Callbacks
     let on_server_change = Callback::new(move |url: String| {

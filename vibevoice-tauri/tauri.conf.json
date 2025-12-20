@@ -20,7 +20,7 @@
     "security": {
       "csp": {
         "default-src": "'self'",
-        "connect-src": "'self' http://localhost:3000 http://127.0.0.1:3000",
+        "connect-src": "'self' http://localhost:3000 http://127.0.0.1:3000 http://192.168.1.11:3000",
         "script-src": "'self' 'wasm-unsafe-eval'",
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self' asset: http://asset.localhost blob: data:"
@@ -29,14 +29,15 @@
     "windows": [
       {
         "title": "VibeVoice",
-        "width": 900,
-        "height": 700,
+        "width": 1920,
+        "height": 1080,
         "minWidth": 600,
         "minHeight": 500,
         "resizable": true,
         "fullscreen": false,
         "center": true,
-        "visible": false
+        "visible": false,
+        "zoomHotkeysEnabled": true
       }
     ],
     "trayIcon": {

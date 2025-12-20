@@ -138,6 +138,10 @@ pub struct Args {
     #[arg(short, long)]
     pub config: Option<PathBuf>,
 
+    /// Host to bind to (overrides config file, default: 0.0.0.0)
+    #[arg(long, default_value = "0.0.0.0")]
+    pub host: String,
+
     /// Port to listen on (overrides config file)
     #[arg(short, long)]
     pub port: Option<u16>,

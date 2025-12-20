@@ -16,6 +16,7 @@
     "notification:allow-request-permission",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
-    "global-shortcut:allow-is-registered"
+    "global-shortcut:allow-is-registered",
+    "core:webview:allow-set-webview-zoom"
   ]
 }
