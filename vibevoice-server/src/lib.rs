@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::ServeDir;
 use tracing::{error, info};
-use vibevoice::{AudioData, Device, ModelVariant, Progress, VibeVoice};
+use vibevoice::{AudioData, Device, ModelVariant, Progress, VibeVoice, VoiceType, resolve_voice_path};
 
 // =============================================================================
 // Configuration
@@ -77,47 +77,39 @@ impl Config {
     /// For Realtime model: looks in voices_dir for .safetensors files.
     /// For Batch models: looks in samples_dir for .wav files.
     pub fn resolve_voice(&self, voice: &str, model: ModelVariant) -> String {
-        let path = PathBuf::from(voice);
-
         // If it's already an absolute path, use it directly
-        if path.is_absolute() {
+        if PathBuf::from(voice).is_absolute() {
             return voice.to_string();
         }
 
-        match model {
-            ModelVariant::Realtime => {
-                // Try voices_dir for safetensors
-                if let Some(ref voices_dir) = self.voices_dir {
-                    let with_ext = if voice.ends_with(".safetensors") {
-                        voices_dir.join(voice)
-                    } else {
-                        voices_dir.join(format!("{}.safetensors", voice))
-                    };
-                    if with_ext.exists() {
-                        return with_ext.to_string_lossy().to_string();
-                    }
-                    let exact = voices_dir.join(voice);
-                    if exact.exists() {
-                        return exact.to_string_lossy().to_string();
-                    }
-                }
+        let voice_type = match model {
+            ModelVariant::Realtime => VoiceType::VoiceCache,
+            ModelVariant::Batch1_5B | ModelVariant::Batch7B => VoiceType::Sample,
+        };
+
+        let search_dir = match voice_type {
+            VoiceType::VoiceCache => self.voices_dir.as_ref(),
+            VoiceType::Sample => self.samples_dir.as_ref(),
+        };
+
+        // Try to resolve directly in the configured directory
+        if let Some(dir) = search_dir {
+            // Add extension if not already present
+            let ext = voice_type.extension();
+            let filename = if voice.ends_with(&format!(".{}", ext)) {
+                voice.to_string()
+            } else {
+                format!("{}.{}", voice, ext)
+            };
+
+            let full_path = dir.join(&filename);
+            if full_path.exists() {
+                return full_path.to_string_lossy().to_string();
             }
-            ModelVariant::Batch1_5B | ModelVariant::Batch7B => {
-                // Try samples_dir for wav files
-                if let Some(ref samples_dir) = self.samples_dir {
-                    let with_ext = if voice.ends_with(".wav") {
-                        samples_dir.join(voice)
-                    } else {
-                        samples_dir.join(format!("{}.wav", voice))
-                    };
-                    if with_ext.exists() {
-                        return with_ext.to_string_lossy().to_string();
-                    }
-                    let exact = samples_dir.join(voice);
-                    if exact.exists() {
-                        return exact.to_string_lossy().to_string();
-                    }
-                }
+
+            // Also try the generic resolve_voice_path as fallback
+            if let Ok(resolved) = resolve_voice_path(voice, Some(dir), voice_type) {
+                return resolved.to_string_lossy().to_string();
             }
         }
 

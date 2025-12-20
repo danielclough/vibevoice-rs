@@ -65,6 +65,8 @@ pub(crate) mod voice_mapper;
 
 // Re-export file logging utility for CLI
 pub use utils::init_file_logging;
+// Voice path resolution utilities for CLI and server
+pub use utils::{VoiceType, detect_voice_type, resolve_voice_path};
 // Voice converter is public for CLI use
 pub mod voice_converter;
 

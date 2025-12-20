@@ -162,7 +162,34 @@ fn main() -> Result<()> {
     // Generate audio
     let audio = if let Some(script_path) = args.script {
         info!("Synthesizing from script: {}", script_path);
-        vv.synthesize_script(&script_path, args.voices_dir.as_deref())?
+
+        // For realtime model, read script as plain text (no multi-speaker support)
+        if variant == ModelVariant::Realtime {
+            let text = std::fs::read_to_string(&script_path)
+                .map_err(|e| anyhow!("Failed to read script file: {}", e))?;
+            let text = text.trim();
+
+            let text_preview = if text.len() > 60 {
+                format!("{}...", &text[..60])
+            } else {
+                text.to_string()
+            };
+            info!("Text: \"{}\"", text_preview);
+
+            let mut chunk_count = 0;
+            vv.synthesize_with_callback(
+                text,
+                args.voice.as_deref(),
+                Some(Box::new(move |progress| {
+                    chunk_count += 1;
+                    if chunk_count % 10 == 0 {
+                        debug!("Generated {} chunks...", progress.step);
+                    }
+                })),
+            )?
+        } else {
+            vv.synthesize_script(&script_path, args.voices_dir.as_deref())?
+        }
     } else {
         let text_preview = if args.text.len() > 60 {
             format!("{}...", &args.text[..60])

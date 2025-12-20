@@ -460,6 +460,12 @@ impl VibeVoiceRealtimeModel {
             return Ok(Tensor::zeros((1, 1, 0), DType::F32, &self.device)?);
         }
 
+        // Ensure all chunks are contiguous before concatenation to avoid garbled audio
+        let audio_chunks: Vec<Tensor> = audio_chunks
+            .into_iter()
+            .map(|chunk| chunk.contiguous())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
         let audio = Tensor::cat(&audio_chunks, 2)?;
         info!("Generated {} audio samples", audio.dim(2)?);
 

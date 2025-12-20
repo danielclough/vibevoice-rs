@@ -11,18 +11,50 @@ use std::path::PathBuf;
 use std::{fs, path::Path};
 use tracing::{debug, error, info, warn};
 
+/// Voice file type for path resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VoiceType {
+    /// .wav files for batch models
+    Sample,
+    /// .safetensors files for realtime model
+    VoiceCache,
+}
+
+impl VoiceType {
+    /// Returns the file extension for this voice type.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            VoiceType::Sample => "wav",
+            VoiceType::VoiceCache => "safetensors",
+        }
+    }
+}
+
+/// Detect voice type from file extension.
+pub fn detect_voice_type(path: &str) -> Option<VoiceType> {
+    match Path::new(path).extension().and_then(|e| e.to_str()) {
+        Some("safetensors") => Some(VoiceType::VoiceCache),
+        Some("wav") => Some(VoiceType::Sample),
+        _ => None,
+    }
+}
+
 /// Resolve a voice path from user input.
 ///
 /// Accepts:
 /// - Absolute path: used directly if it exists
 /// - Relative path: resolved from current directory if it exists
-/// - Voice name (with or without .wav): searched in:
+/// - Voice name (with or without extension): searched in:
 ///   1. Script directory's `voices/` folder (if script_dir provided)
 ///   2. `./voices/` folder (current working directory)
 ///   3. Executable directory's `voices/` folder
 ///
 /// Returns the resolved PathBuf or an error if the voice cannot be found.
-pub fn resolve_voice_path(voice_input: &str, script_dir: Option<&Path>) -> Result<PathBuf> {
+pub fn resolve_voice_path(
+    voice_input: &str,
+    script_dir: Option<&Path>,
+    voice_type: VoiceType,
+) -> Result<PathBuf> {
     let voice_path = Path::new(voice_input);
 
     // 1. If it's an absolute path, use it directly
@@ -81,11 +113,12 @@ pub fn resolve_voice_path(voice_input: &str, script_dir: Option<&Path>) -> Resul
     }
 
     // 3. Treat as a voice name - search in voices directories
-    // Ensure we have a .wav extension for searching
-    let voice_name = if voice_input.ends_with(".wav") {
+    // Ensure we have the correct extension for searching
+    let ext = voice_type.extension();
+    let voice_name = if voice_input.ends_with(&format!(".{}", ext)) {
         voice_input.to_string()
     } else {
-        format!("{}.wav", voice_input)
+        format!("{}.{}", voice_input, ext)
     };
 
     // Build list of directories to search
