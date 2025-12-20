@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Leptos CSR web frontend for VibeVoice TTS"
 
 [dependencies]
-leptos = { version = "0.7", features = ["csr"] }
+leptos = { version = "0.8", features = ["csr"] }
 gloo-net = "0.6"
 gloo-storage = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }

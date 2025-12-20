@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./run_i18n_voices.sh           # Run all voices
+#   ./run_i18n_voices.sh all       # Run all voices (explicit)
 #   ./run_i18n_voices.sh in-man    # Run Indonesian male voice
 #   ./run_i18n_voices.sh en-woman  # Run all English female voices
 #   ./run_i18n_voices.sh de        # Run all German voices
@@ -19,9 +20,9 @@ mkdir -p "$OUTPUT_DIR"
 
 # Build release binary first
 echo "Building release binary..."
-cargo build --release
+cargo build --release -p vibevoice-cli
 
-BINARY="./target/release/vibevoice-rs"
+BINARY="./target/release/vibevoice"
 
 # Array of all voice/text pairs
 declare -a ALL_VOICES=(
@@ -65,8 +66,8 @@ declare -a ALL_VOICES=(
 
 # Filter voices based on arguments
 declare -a VOICES=()
-if [[ $# -eq 0 ]]; then
-    # No args: run all voices
+if [[ $# -eq 0 ]] || [[ "$1" == "all" ]]; then
+    # No args or "all": run all voices
     VOICES=("${ALL_VOICES[@]}")
 else
     # Filter by pattern(s)
@@ -127,13 +128,13 @@ for voice in "${VOICES[@]}"; do
 
     if [[ ! -f "$VOICE_FILE" ]]; then
         echo "SKIP: Voice file not found: $VOICE_FILE"
-        ((FAILED++))
+        ((++FAILED))
         continue
     fi
 
     if [[ ! -f "$TEXT_FILE" ]]; then
         echo "SKIP: Text file not found: $TEXT_FILE"
-        ((FAILED++))
+        ((++FAILED))
         continue
     fi
 
@@ -142,15 +143,17 @@ for voice in "${VOICES[@]}"; do
     echo "  Text:  $TEXT_FILE"
     echo "  Output: $OUTPUT_FILE"
 
-    if $BINARY --realtime \
-        --voice-cache "$VOICE_FILE" \
-        --script "$TEXT_FILE" \
+    # Read text from file and pass via --text (realtime model doesn't support --script)
+    TEXT_CONTENT=$(cat "$TEXT_FILE")
+    if $BINARY --model realtime \
+        --voice "$VOICE_FILE" \
+        --text "$TEXT_CONTENT" \
         --output "$OUTPUT_FILE"; then
         echo "  SUCCESS"
-        ((SUCCESS++))
+        ((++SUCCESS))
     else
         echo "  FAILED"
-        ((FAILED++))
+        ((++FAILED))
     fi
     echo ""
 done

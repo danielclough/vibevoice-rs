@@ -12,6 +12,7 @@ debug/
 *.wav
 
 # Allowed
+!text_examples/i18n/i18n-reference-output/*.wav
 !**/README.md
 !**/.gitignore
 !voices/*.wav
