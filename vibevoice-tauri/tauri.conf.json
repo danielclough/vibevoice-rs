@@ -6,13 +6,13 @@
   "build": {
     "beforeDevCommand": {
       "cwd": "../vibevoice-web",
-      "script": "trunk serve --port 8080"
+      "script": "trunk serve --port 8908"
     },
     "beforeBuildCommand": {
       "cwd": "../vibevoice-web",
       "script": "trunk build --release"
     },
-    "devUrl": "http://localhost:8080",
+    "devUrl": "http://localhost:8908",
     "frontendDist": "../vibevoice-web/dist"
   },
   "app": {
@@ -20,7 +20,7 @@
     "security": {
       "csp": {
         "default-src": "'self'",
-        "connect-src": "'self' http://localhost:3000 http://127.0.0.1:3000 http://192.168.1.11:3000",
+        "connect-src": "'self' http://localhost:3908 http://127.0.0.1:3908 http://192.168.1.11:3908",
         "script-src": "'self' 'wasm-unsafe-eval'",
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self' asset: http://asset.localhost blob: data:"

@@ -20,7 +20,7 @@ pub fn ServerConfig(
             <input
                 type="text"
                 id="server-url"
-                placeholder="http://localhost:3000"
+                placeholder="http://localhost:3908"
                 prop:value=move || server_url.get()
                 on:input=on_input
             />

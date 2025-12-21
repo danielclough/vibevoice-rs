@@ -29,7 +29,7 @@ pub struct Config {
     #[serde(default)]
     pub host: Option<String>,
 
-    /// Port to listen on (default: 3000)
+    /// Port to listen on (default: 3908)
     #[serde(default)]
     pub port: Option<u16>,
 

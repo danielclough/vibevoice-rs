@@ -56,7 +56,7 @@ impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
             embedded_server: true,
-            server_port: 3000,
+            server_port: 3908,
             remote_server_url: None,
             voices_dir: None,
             samples_dir: None,

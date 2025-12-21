@@ -12,7 +12,7 @@ Desktop application for VibeVoice text-to-speech, built with Tauri v2.
 
 ## Requirements
 
-- Rust 1.75+
+- Rust 1.85+
 - Tauri CLI v2: `cargo install tauri-cli --version "^2"`
 - [Trunk](https://trunkrs.dev/): `cargo install trunk`
 - System dependencies for Tauri (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/))
@@ -62,10 +62,10 @@ The app uses a TOML config file located at:
 embedded_server = true
 
 # Port for embedded server
-server_port = 3000
+server_port = 3908
 
 # Remote server URL (used when embedded_server = false)
-remote_server_url = "http://192.168.1.100:3000"
+remote_server_url = "http://192.168.1.100:3908"
 
 # Voice files directory
 voices_dir = "/path/to/voices"
@@ -93,11 +93,11 @@ To connect to a VibeVoice server running on another device:
 3. Set `remote_server_url` to the remote server's address:
    ```toml
    embedded_server = false
-   remote_server_url = "http://192.168.1.100:3000"
+   remote_server_url = "http://192.168.1.100:3908"
    ```
 4. Update the CSP in `tauri.conf.json` to allow the connection:
    ```json
-   "connect-src": "'self' http://192.168.1.11:3000"
+   "connect-src": "'self' http://192.168.1.11:3908"
    ```
 
 #### Create a config file to disable the embedded server on Linux
@@ -105,7 +105,7 @@ To connect to a VibeVoice server running on another device:
 mkdir ~/.config/vibevoice
 cat << EOF > ~/.config/vibevoice/config.toml
 embedded_server = false
-remote_server_url = "http://192.168.1.11:3000"
+remote_server_url = "http://192.168.1.11:3908"
 EOF
 ```
 

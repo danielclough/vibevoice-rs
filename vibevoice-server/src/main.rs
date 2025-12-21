@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Resolve host/port: CLI args override config, which overrides defaults
     let host = args.host.clone();
-    let port = args.port.unwrap_or_else(|| config.port.unwrap_or(3000));
+    let port = args.port.unwrap_or_else(|| config.port.unwrap_or(3908));
 
     info!("Starting VibeVoice server on {}:{}", host, port);
     info!("Model: {:?}", args.model);

@@ -22,7 +22,7 @@ Create a `config.yaml` file (see `config.example.yaml`):
 ```yaml
 # Server binding
 host: 0.0.0.0
-port: 3000
+port: 3908
 
 # Directory containing voice .safetensors files (realtime model)
 voices_dir: /path/to/voices/streaming_model
@@ -44,7 +44,7 @@ web_dir: /path/to/vibevoice-web/dist
 vibevoice-server --config config.yaml
 
 # Override settings via CLI
-vibevoice-server --config config.yaml --port 8080 --model realtime --cors
+vibevoice-server --config config.yaml --port 8908 --model realtime --cors
 ```
 
 ### CLI Options
@@ -67,7 +67,7 @@ The `--model` flag sets the default model loaded at startup. Requests can overri
 Health check.
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:3908/health
 ```
 
 Response:
@@ -80,7 +80,7 @@ Response:
 List available voices from configured directories.
 
 ```bash
-curl http://localhost:3000/voices
+curl http://localhost:3908/voices
 ```
 
 Response:
@@ -96,13 +96,13 @@ Response:
 Synthesize speech, returns WAV audio.
 
 ```bash
-curl -X POST http://localhost:3000/synthesize \
+curl -X POST http://localhost:3908/synthesize \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-Emma_woman"}' \
   -o output.wav
 
 # With specific model
-curl -X POST http://localhost:3000/synthesize \
+curl -X POST http://localhost:3908/synthesize \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-Emma_woman", "model": "7B"}' \
   -o output.wav
@@ -113,12 +113,12 @@ curl -X POST http://localhost:3000/synthesize \
 Synthesize speech, returns JSON with base64-encoded WAV.
 
 ```bash
-curl -X POST http://localhost:3000/synthesize/json \
+curl -X POST http://localhost:3908/synthesize/json \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-Emma_woman"}'
 
 # With specific model
-curl -X POST http://localhost:3000/synthesize/json \
+curl -X POST http://localhost:3908/synthesize/json \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-Emma_woman", "model": "1.5B"}'
 ```
@@ -137,12 +137,12 @@ Response:
 SSE streaming synthesis. Sends WAV header first, then raw PCM chunks.
 
 ```bash
-curl -sN -X POST http://localhost:3000/synthesize/stream \
+curl -sN -X POST http://localhost:3908/synthesize/stream \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-Emma_woman"}'
 
 # With specific model
-curl -sN -X POST http://localhost:3000/synthesize/stream \
+curl -sN -X POST http://localhost:3908/synthesize/stream \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-Emma_woman", "model": "realtime"}'
 ```
@@ -168,7 +168,7 @@ data: {"duration_secs": 1.5, "total_steps": 10, "total_pcm_bytes": 72000}
 Pipe SSE stream to ffplay:
 
 ```bash
-curl -sN -X POST http://localhost:3000/synthesize/stream \
+curl -sN -X POST http://localhost:3908/synthesize/stream \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello! This is the realtime streaming model. It generates audio chunk by chunk for low latency applications.", "voice": "en-Emma_woman"}' \
   | python3 scripts/sse_to_wav.py | ffplay -autoexit -nodisp -
@@ -177,7 +177,7 @@ curl -sN -X POST http://localhost:3000/synthesize/stream \
 Or inline:
 
 ```bash
-curl -sN -X POST http://localhost:3000/synthesize/stream \
+curl -sN -X POST http://localhost:3908/synthesize/stream \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello world", "voice": "en-Emma_woman"}' \
   | python3 -c "

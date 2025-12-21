@@ -16,7 +16,7 @@ use crate::sse::stream::{start_streaming, SseEvent, StreamingState};
 const STORAGE_SERVER_URL: &str = "vibevoice.server_url";
 const STORAGE_MODEL: &str = "vibevoice.model";
 const STORAGE_STREAMING: &str = "vibevoice.use_streaming";
-const DEFAULT_SERVER_URL: &str = "http://localhost:3000";
+const DEFAULT_SERVER_URL: &str = "http://localhost:3908";
 
 #[component]
 pub fn App() -> impl IntoView {

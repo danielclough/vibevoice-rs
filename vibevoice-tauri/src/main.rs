@@ -42,7 +42,7 @@ fn get_server_url(state: tauri::State<AppState>) -> String {
             .config
             .remote_server_url
             .clone()
-            .unwrap_or_else(|| "http://localhost:3000".to_string());
+            .unwrap_or_else(|| "http://localhost:3908".to_string());
     }
 
     // Otherwise return embedded server URL
@@ -102,7 +102,7 @@ fn main() {
         let remote_url = config
             .remote_server_url
             .as_deref()
-            .unwrap_or("http://localhost:3000");
+            .unwrap_or("http://localhost:3908");
         info!("Using remote server: {}", remote_url);
         None
     };

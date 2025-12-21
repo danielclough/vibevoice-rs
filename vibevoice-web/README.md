@@ -12,7 +12,7 @@ Leptos 0.8 CSR web frontend for VibeVoice text-to-speech.
 
 ## Requirements
 
-- Rust 1.75+
+- Rust 1.85+
 - [Trunk](https://trunkrs.dev/): `cargo install trunk`
 - wasm32 target: `rustup target add wasm32-unknown-unknown`
 
@@ -23,9 +23,9 @@ cd vibevoice-web
 trunk serve
 ```
 
-Opens at http://127.0.0.1:8080 with hot reload (watches `src/`, `index.html`, `style.css`).
+Opens at http://127.0.0.1:8908 with hot reload (watches `src/`, `index.html`, `style.css`).
 
-Requires a running vibevoice-server (default: http://localhost:3000).
+Requires a running vibevoice-server (default: http://localhost:3908).
 
 ## Building
 
@@ -42,7 +42,7 @@ Output is written to `dist/` directory.
 Serve the `dist/` directory with any static file server:
 
 ```bash
-python3 -m http.server -d dist 8080
+python3 -m http.server -d dist 8908
 ```
 
 ### With vibevoice-server

@@ -30,7 +30,7 @@ impl EmbeddedServer {
     ///
     /// Returns once the server is ready to accept connections.
     pub fn start(config: Config, model_variant: ModelVariant) -> anyhow::Result<Self> {
-        let port = config.port.unwrap_or(3000);
+        let port = config.port.unwrap_or(3908);
         let host = config.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
         let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
 

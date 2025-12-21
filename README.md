@@ -24,7 +24,7 @@ Rust implementation of VibeVoice text-to-speech with voice cloning and multi-spe
 
 ## Requirements
 
-- Rust 1.75+
+- Rust 1.85+
 - HuggingFace account and token
 - GPU recommended (Metal on Apple Silicon, CUDA on NVIDIA)
 
