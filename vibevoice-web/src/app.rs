@@ -301,14 +301,25 @@ pub fn App() -> impl IntoView {
             <Show when=move || !show_setup.get() && !is_connecting.get()>
                 <header class="app-header">
                     <div class="logo-section">
-                        <h1 class="app-title">"VibeVoice"</h1>
+                        <div class="app-logo" role="img" aria-label="VibeVoice logo"></div>
+                        <div>
+                            <h1 class="app-title">"VibeVoice-RS"</h1>
+                            <p class="tagline">"Text-to-Speech Synthesis"</p>
+                        </div>
                     </div>
-                    <p class="tagline">"Text-to-Speech Synthesis"</p>
                 </header>
 
                 <div class="main-layout">
                     // Sidebar with history and batch mode toggle
                     <Sidebar is_open=sidebar_open>
+
+                        <button
+                            class="mode-toggle-btn"
+                            on:click=move |_| batch_mode.update(|b| *b = !*b)
+                        >
+                            {move || if batch_mode.get() { "Single Mode" } else { "Batch Mode" }}
+                        </button>
+
                         <AudioHistory
                             history=audio_history.into()
                             current_server_url=server_url.into()
@@ -328,15 +339,6 @@ pub fn App() -> impl IntoView {
                                 selected_voice.set(entry.voice);
                             })
                         />
-
-                        <div class="sidebar-divider" />
-
-                        <button
-                            class="mode-toggle-btn"
-                            on:click=move |_| batch_mode.update(|b| *b = !*b)
-                        >
-                            {move || if batch_mode.get() { "Single Mode" } else { "Batch Mode" }}
-                        </button>
                     </Sidebar>
 
                     // Main content area
@@ -388,6 +390,14 @@ pub fn App() -> impl IntoView {
                                         on_delete=Callback::new(move |id: String| {
                                             templates.update(|ts| {
                                                 ts.retain(|t| t.id != id);
+                                                storage::templates::save(ts);
+                                            });
+                                        })
+                                        on_edit=Callback::new(move |(id, new_text): (String, String)| {
+                                            templates.update(|ts| {
+                                                if let Some(t) = ts.iter_mut().find(|t| t.id == id) {
+                                                    t.text = new_text;
+                                                }
                                                 storage::templates::save(ts);
                                             });
                                         })

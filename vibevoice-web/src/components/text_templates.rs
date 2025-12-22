@@ -11,9 +11,11 @@ pub fn TextTemplates(
     #[prop(into)] on_select: Callback<TextTemplate>,
     #[prop(into)] on_save: Callback<String>,
     #[prop(into)] on_delete: Callback<String>,
+    #[prop(into)] on_edit: Callback<(String, String)>, // (id, new_text)
 ) -> impl IntoView {
     let show_save_input = RwSignal::new(false);
     let template_name = RwSignal::new(String::new());
+    let editing_id = RwSignal::new(Option::<String>::None);
 
     let save_template = move || {
         let name = template_name.get_untracked();
@@ -48,6 +50,7 @@ pub fn TextTemplates(
                             }
                         }
                         select.set_value("");  // Reset to placeholder
+                        editing_id.set(None);  // Clear editing state when selecting
                     }
                 >
                     <option value="" disabled=true selected=true>"Load template..."</option>
@@ -95,28 +98,91 @@ pub fn TextTemplates(
                     </button>
                 </div>
             </Show>
-            // Template list with delete buttons (shown when there are templates)
+            // Template list with edit/delete buttons (shown when there are templates)
             <Show when=move || !templates.get().is_empty()>
                 <div class="templates-list">
                     {move || templates.get().into_iter().map(|t| {
+                        let id = t.id.clone();
+                        let id_for_edit = t.id.clone();
+                        let id_for_update = t.id.clone();
                         let id_for_delete = t.id.clone();
-                        let template_for_select = t.clone();
+                        let id_for_check = t.id.clone();
+                        let template_for_click = t.clone();
+                        let template_for_edit = t.clone();
+
                         view! {
                             <div
                                 class="template-item"
-                                on:click=move |_| on_select.run(template_for_select.clone())
+                                on:click={
+                                    let template = template_for_click.clone();
+                                    move |_| {
+                                        on_select.run(template.clone());
+                                        editing_id.set(None);
+                                    }
+                                }
                             >
                                 <span class="template-name">{t.name.clone()}</span>
-                                <button
-                                    class="template-delete-btn"
-                                    on:click=move |ev| {
-                                        ev.stop_propagation();
-                                        on_delete.run(id_for_delete.clone());
-                                    }
-                                    title="Delete template"
-                                >
-                                    "Delete"
-                                </button>
+                                <div class="template-actions">
+                                    // Show Update button when editing this template
+                                    <Show when=move || editing_id.get().as_ref() == Some(&id_for_check)>
+                                        <button
+                                            class="template-update-btn"
+                                            on:click={
+                                                let id = id_for_update.clone();
+                                                move |ev: web_sys::MouseEvent| {
+                                                    ev.stop_propagation();
+                                                    let text = current_text.get_untracked();
+                                                    on_edit.run((id.clone(), text));
+                                                    editing_id.set(None);
+                                                }
+                                            }
+                                            title="Update template with current text"
+                                        >
+                                            "Update"
+                                        </button>
+                                        <button
+                                            class="template-cancel-btn"
+                                            on:click=move |ev: web_sys::MouseEvent| {
+                                                ev.stop_propagation();
+                                                editing_id.set(None);
+                                            }
+                                            title="Cancel editing"
+                                        >
+                                            "Cancel"
+                                        </button>
+                                    </Show>
+                                    // Show Edit/Delete when not editing
+                                    <Show when=move || editing_id.get().as_ref() != Some(&id)>
+                                        <button
+                                            class="template-edit-btn"
+                                            on:click={
+                                                let template = template_for_edit.clone();
+                                                let id = id_for_edit.clone();
+                                                move |ev: web_sys::MouseEvent| {
+                                                    ev.stop_propagation();
+                                                    on_select.run(template.clone());
+                                                    editing_id.set(Some(id.clone()));
+                                                }
+                                            }
+                                            title="Edit template content"
+                                        >
+                                            "Edit"
+                                        </button>
+                                        <button
+                                            class="template-delete-btn"
+                                            on:click={
+                                                let id = id_for_delete.clone();
+                                                move |ev: web_sys::MouseEvent| {
+                                                    ev.stop_propagation();
+                                                    on_delete.run(id.clone());
+                                                }
+                                            }
+                                            title="Delete template"
+                                        >
+                                            "Delete"
+                                        </button>
+                                    </Show>
+                                </div>
                             </div>
                         }
                     }).collect_view()}

@@ -5,12 +5,13 @@
 }
 
 :root {
+    color-scheme: light dark;
     --bg-primary: #1a1a2e;
     --bg-secondary: #16213e;
     --bg-panel: #0f3460;
     --text-primary: #eaeaea;
     --text-secondary: #a0a0a0;
-    --accent: #e94560;
+    --accent: #f74b00;
     --accent-hover: #ff6b6b;
     --border: #2a2a4a;
     --success: #4ade80;
@@ -36,7 +37,7 @@ body {
 
 header {
     text-align: center;
-    margin-bottom: 2rem;
+    margin-bottom: 1.5rem;
 }
 
 header h1 {
@@ -54,9 +55,10 @@ main {
 
 footer {
     text-align: center;
-    margin-top: 2rem;
-    border-top: 1px solid var(--border);
     background-color:rgb(99, 99, 99);
+    position: static;
+    bottom: 0;
+    width: 100%;
 }
 footer a {
     color: #3b82f6;
@@ -585,8 +587,8 @@ select {
 
 /* Audio History */
 .history-section {
-    margin-top: 1.5rem;
-    padding-top: 1.5rem;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
     border-top: 1px solid var(--border);
 }
 
@@ -603,7 +605,6 @@ select {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    max-height: 300px;
     overflow-y: auto;
 }
 
@@ -674,6 +675,11 @@ select {
 .history-btn.play-btn:hover {
     border-color: var(--success);
     color: var(--success);
+}
+
+.history-btn.download-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 /* Text Templates */
@@ -790,6 +796,23 @@ select {
     color: var(--text-primary);
 }
 
+.template-actions {
+    display: flex;
+    gap: 0.25rem;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.template-item:hover .template-actions {
+    opacity: 1;
+}
+
+/* Always show actions when Update/Cancel are present (edit mode) */
+.template-actions:has(.template-update-btn) {
+    opacity: 1;
+}
+
+.template-edit-btn,
 .template-delete-btn {
     padding: 0.125rem 0.375rem;
     background: transparent;
@@ -801,8 +824,39 @@ select {
     transition: color 0.2s;
 }
 
+.template-edit-btn:hover {
+    color: var(--accent);
+}
+
 .template-delete-btn:hover {
     color: var(--error);
+}
+
+.template-update-btn,
+.template-cancel-btn {
+    padding: 0.125rem 0.375rem;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 0.875rem;
+    line-height: 1;
+    transition: color 0.2s;
+}
+
+.template-update-btn {
+    color: var(--accent);
+}
+
+.template-update-btn:hover {
+    color: var(--accent-hover);
+}
+
+.template-cancel-btn {
+    color: var(--text-secondary);
+}
+
+.template-cancel-btn:hover {
+    color: var(--text-primary);
 }
 
 @keyframes slide-down {
@@ -883,7 +937,6 @@ select {
 }
 
 .app-header {
-    padding: 1.5rem 2rem;
     text-align: center;
     border-bottom: 1px solid var(--border);
 }
@@ -894,6 +947,27 @@ select {
     justify-content: center;
     gap: 0.75rem;
     margin-bottom: 0.5rem;
+    background: var(--bg-panel);
+}
+
+.app-logo {
+    width: 100px;
+    height: 100px;
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+    /* Fallback for browsers without light-dark() support */
+    background-image: url("logo_white_80.png");
+    /* Modern browsers with light-dark() */
+    background-image: light-dark(url("logo_black_80.png"), url("logo_white_80.png"));
+}
+
+/* High DPI screens */
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+    .app-logo {
+        background-image: url("logo_white_120.png");
+        background-image: light-dark(url("logo_black_120.png"), url("logo_white_120.png"));
+    }
 }
 
 .app-title {
@@ -914,11 +988,12 @@ select {
     flex: 1;
     gap: 0;
     position: relative;
+    max-height: calc(100vh - 50px);
 }
 
 .main-content {
     flex: 1;
-    padding: 2rem;
+    padding: 0 2rem;
     overflow-y: auto;
 }
 
@@ -929,14 +1004,14 @@ select {
     background: var(--bg-panel);
     border-right: 1px solid var(--border);
     position: relative;
-    transition: margin-left 0.3s ease, width 0.3s ease;
+    transition: width 0.3s ease, min-width 0.3s ease;
     overflow: hidden;
+    border-radius: 12px 12px 0 0;
 }
 
 .sidebar.sidebar-collapsed {
-    margin-left: -260px;
-    min-width: 40px;
     width: 40px;
+    min-width: 40px;
 }
 
 .sidebar-toggle {
@@ -967,10 +1042,10 @@ select {
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    max-height: calc(100vh - 200px);
     overflow-y: auto;
     opacity: 1;
     transition: opacity 0.2s;
+    max-height: calc(100vh - 200px);
 }
 
 .sidebar-collapsed .sidebar-content {
@@ -1156,7 +1231,6 @@ select {
 .app-footer {
     padding: 1rem 2rem;
     text-align: center;
-    border-top: 1px solid var(--border);
     color: var(--text-secondary);
     font-size: 0.875rem;
     background: var(--bg-panel);

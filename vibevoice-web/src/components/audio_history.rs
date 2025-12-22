@@ -1,6 +1,7 @@
 //! Audio history component for displaying and managing saved audio clips.
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use crate::storage::history::HistoryEntry;
 
 #[component]
@@ -71,6 +72,7 @@ fn HistoryItem(
 ) -> impl IntoView {
     let entry_play = entry.clone();
     let entry_reuse = entry.clone();
+    let entry_download = entry.clone();
     let id_delete = entry.id.clone();
 
     let display_text: String = entry.text.chars().take(50).collect();
@@ -80,6 +82,44 @@ fn HistoryItem(
         display_text
     };
     let full_text = entry.text.clone();
+
+    let download_audio = move |_| {
+        let entry = entry_download.clone();
+        if let Ok(bytes) = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &entry.audio_b64,
+        ) {
+            // Create blob and download
+            let array = js_sys::Uint8Array::from(&bytes[..]);
+            let blob_parts = js_sys::Array::new();
+            blob_parts.push(&array);
+
+            if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(
+                &blob_parts,
+                web_sys::BlobPropertyBag::new().type_("audio/wav"),
+            ) {
+                if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                    let window = web_sys::window().unwrap();
+                    let document = window.document().unwrap();
+                    let a: web_sys::HtmlAnchorElement = document
+                        .create_element("a")
+                        .unwrap()
+                        .unchecked_into();
+                    a.set_href(&url);
+                    // Create filename from first few words of text
+                    let filename: String = entry.text
+                        .split_whitespace()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    let filename = format!("{}.wav", if filename.is_empty() { "audio" } else { &filename });
+                    a.set_download(&filename);
+                    a.click();
+                    let _ = web_sys::Url::revoke_object_url(&url);
+                }
+            }
+        }
+    };
 
     view! {
         <div class="history-entry">
@@ -92,27 +132,38 @@ fn HistoryItem(
                 <span class="history-model">{entry.model.clone()}</span>
             </div>
             <div class="history-entry-actions">
-                <button
-                    class="history-btn play-btn"
-                    on:click=move |_| on_play.run(entry_play.clone())
-                    title="Play audio"
-                >
-                    "Play"
-                </button>
-                <button
-                    class="history-btn reuse-btn"
-                    on:click=move |_| on_reuse.run(entry_reuse.clone())
-                    title="Load text and settings"
-                >
-                    "Reuse"
-                </button>
-                <button
-                    class="history-btn delete-btn"
-                    on:click=move |_| on_delete.run(id_delete.clone())
-                    title="Delete from history"
-                >
-                    "Delete"
-                </button>
+                <div>
+                    <button
+                        class="history-btn play-btn"
+                        on:click=move |_| on_play.run(entry_play.clone())
+                        title="Play audio"
+                    >
+                        "Play"
+                    </button>
+                    <button
+                        class="history-btn download-btn"
+                        on:click=download_audio
+                        title="Download audio"
+                    >
+                        "Download"
+                    </button>
+                </div>
+                <div>
+                    <button
+                        class="history-btn reuse-btn"
+                        on:click=move |_| on_reuse.run(entry_reuse.clone())
+                        title="Load text and settings"
+                    >
+                        "Reuse"
+                    </button>
+                    <button
+                        class="history-btn delete-btn"
+                        on:click=move |_| on_delete.run(id_delete.clone())
+                        title="Delete from history"
+                    >
+                        "Delete"
+                    </button>
+                </div>
             </div>
         </div>
     }
