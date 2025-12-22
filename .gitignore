@@ -15,4 +15,5 @@ debug/
 !text_examples/i18n/i18n-reference-output/*.wav
 !**/README.md
 !**/.gitignore
+!.github/
 !voices/*.wav

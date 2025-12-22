@@ -1,0 +1,660 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build the WASM frontend once and share across all platforms
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-build
+
+      - name: Install Trunk
+        run: cargo install trunk --locked
+
+      - name: Build web frontend
+        run: trunk build --release
+        working-directory: vibevoice-web
+
+      - name: Upload web build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: vibevoice-web/dist
+          retention-days: 1
+
+  # Build Tauri app for each platform
+  build:
+    needs: [build-web]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 with CUDA
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: linux-gpu
+            install-cuda: true
+            artifact-name: linux-x86_64
+
+          # Linux aarch64 (CPU-only, cross-compiled)
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            features: ""
+            cross: true
+            artifact-name: linux-aarch64
+
+          # Windows x86_64 with CUDA
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: windows-gpu
+            install-cuda: true
+            artifact-name: windows-x86_64
+
+          # Windows aarch64 (CPU-only, cross-compiled)
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            features: ""
+            cross: true
+            artifact-name: windows-aarch64
+
+          # macOS Apple Silicon with Metal
+          - os: macos-14
+            target: aarch64-apple-darwin
+            features: macos
+            artifact-name: macos-aarch64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download web build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: vibevoice-web/dist
+
+      # Linux system dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libglib2.0-dev libcairo2-dev \
+            libpango1.0-dev libgdk-pixbuf-2.0-dev libatk1.0-dev \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libfuse2
+
+      # Linux aarch64 cross-compilation dependencies
+      - name: Install Linux ARM64 cross-compilation tools
+        if: runner.os == 'Linux' && matrix.cross
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libgtk-3-dev:arm64 libglib2.0-dev:arm64 \
+            libwebkit2gtk-4.1-dev:arm64 libappindicator3-dev:arm64 \
+            librsvg2-dev:arm64 libssl-dev:arm64 patchelf
+
+      # CUDA installation for Linux
+      - name: Install CUDA (Linux)
+        if: runner.os == 'Linux' && matrix.install-cuda
+        run: |
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-4 libcudnn8 libcudnn8-dev
+          echo "CUDA_PATH=/usr/local/cuda-12.4" >> $GITHUB_ENV
+          echo "/usr/local/cuda-12.4/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          # Set compute capability for candle-kernels (no GPU on CI runners)
+          echo "CUDA_COMPUTE_CAP=80" >> $GITHUB_ENV
+
+      # CUDA installation for Windows
+      - name: Install CUDA (Windows)
+        if: runner.os == 'Windows' && matrix.install-cuda
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/12.4.0/network_installers/cuda_12.4.0_windows_network.exe" -OutFile cuda_installer.exe
+          # Install both runtime and dev components for all libraries we need
+          Start-Process -Wait -FilePath "cuda_installer.exe" -ArgumentList "-s nvcc_12.4 cudart_12.4 cublas_12.4 cublas_dev_12.4 curand_12.4 curand_dev_12.4 cusolver_12.4 cusolver_dev_12.4 cusparse_12.4 cusparse_dev_12.4 nvrtc_12.4 nvrtc_dev_12.4 nvml_dev_12.4"
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" >> $env:GITHUB_ENV
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin" >> $env:GITHUB_PATH
+          # Set compute capability for candle-kernels (no GPU on CI runners)
+          echo "CUDA_COMPUTE_CAP=80" >> $env:GITHUB_ENV
+
+          # Debug: List what was installed
+          $cudaLib = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64"
+          Write-Host "CUDA libs installed:"
+          if (Test-Path $cudaLib) {
+            Get-ChildItem "$cudaLib\*.lib" | Select-Object Name
+          } else {
+            Write-Host "WARNING: CUDA lib directory does not exist: $cudaLib"
+          }
+
+      # Install cuDNN for Windows
+      - name: Install cuDNN (Windows)
+        if: runner.os == 'Windows' && matrix.install-cuda
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          # Download cuDNN from NVIDIA (using cudnn 8.9.7 for CUDA 12)
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.9.7.29_cuda12-archive.zip" -OutFile cudnn.zip
+          Expand-Archive cudnn.zip -DestinationPath cudnn
+          $cudnnDir = Get-ChildItem cudnn -Directory | Select-Object -First 1
+          Copy-Item "$($cudnnDir.FullName)\bin\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin\" -Force
+          Copy-Item "$($cudnnDir.FullName)\include\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\include\" -Force
+          Copy-Item "$($cudnnDir.FullName)\lib\x64\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64\" -Force
+
+          # cuDNN 8.x splits into component libraries with versioned names
+          # Create unversioned copies for the linker
+          $cudaLib = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64"
+          $cudnnLibs = @(
+            "cudnn_adv_infer",
+            "cudnn_adv_train",
+            "cudnn_cnn_infer",
+            "cudnn_cnn_train",
+            "cudnn_ops_infer",
+            "cudnn_ops_train"
+          )
+          foreach ($lib in $cudnnLibs) {
+            # Find versioned lib (e.g., cudnn_adv_infer64_8.lib)
+            $pattern = "$lib*64*.lib"
+            $srcFile = Get-ChildItem -Path $cudaLib -Filter $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $srcFile) {
+              $dstPath = Join-Path $cudaLib "$lib.lib"
+              Copy-Item $srcFile.FullName $dstPath -Force
+              Write-Host "Created $lib.lib from $($srcFile.Name)"
+            }
+          }
+
+          Write-Host "cuDNN libs available:"
+          Get-ChildItem "$cudaLib\cudnn*.lib" | Select-Object Name
+
+          # Verify essential cuDNN files exist
+          $cudnnLib = Join-Path $cudaLib "cudnn.lib"
+          if (-not (Test-Path $cudnnLib)) {
+            Write-Error "FATAL: cudnn.lib not found at $cudnnLib after cuDNN installation"
+            exit 1
+          }
+
+          $advInferLib = Get-ChildItem -Path $cudaLib -Filter "cudnn_adv_infer*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $advInferLib) {
+            Write-Error "FATAL: No cudnn_adv_infer*.lib found in $cudaLib - cuDNN component libraries missing"
+            exit 1
+          }
+          Write-Host "cuDNN installation verified: cudnn.lib and component libraries present"
+
+      # Download NVRTC if not present (network installer may not include it)
+      - name: Install NVRTC (Windows)
+        if: runner.os == 'Windows' && matrix.install-cuda
+        shell: pwsh
+        run: |
+          $cudaLib = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64"
+          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
+
+          # Check if nvrtc already exists
+          $hasNvrtc = (Get-ChildItem -Path $cudaLib -Filter "nvrtc*.lib" -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+          if ($hasNvrtc) {
+            Write-Host "NVRTC library already present"
+            exit 0
+          }
+
+          Write-Host "NVRTC not found, downloading from NVIDIA redistributables..."
+          $ProgressPreference = 'SilentlyContinue'
+
+          # Download NVRTC redistributable for CUDA 12.4
+          Invoke-WebRequest -Uri "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.127-archive.zip" -OutFile nvrtc.zip
+          Expand-Archive nvrtc.zip -DestinationPath nvrtc_extract
+
+          $nvrtcDir = Get-ChildItem nvrtc_extract -Directory | Select-Object -First 1
+          Write-Host "NVRTC extracted to: $($nvrtcDir.FullName)"
+
+          # Copy lib files
+          if (Test-Path "$($nvrtcDir.FullName)\lib\x64") {
+            Copy-Item "$($nvrtcDir.FullName)\lib\x64\*" $cudaLib -Force
+            Write-Host "Copied NVRTC libs to $cudaLib"
+          }
+
+          # Copy bin files (DLLs)
+          if (Test-Path "$($nvrtcDir.FullName)\bin") {
+            Copy-Item "$($nvrtcDir.FullName)\bin\*" $cudaBin -Force
+            Write-Host "Copied NVRTC bins to $cudaBin"
+          }
+
+          # List what we got
+          Write-Host "NVRTC libs now available:"
+          Get-ChildItem "$cudaLib\nvrtc*" -ErrorAction SilentlyContinue | Select-Object Name
+
+      # Create unversioned CUDA library names for linker compatibility
+      - name: Create CUDA lib symlinks (Windows)
+        if: runner.os == 'Windows' && matrix.install-cuda
+        shell: pwsh
+        run: |
+          $cudaLib = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64"
+
+          Write-Host "CUDA libs available in $cudaLib :"
+          Get-ChildItem "$cudaLib\*.lib" | Select-Object Name
+
+          $dstPath = Join-Path $cudaLib "nvrtc.lib"
+
+          # Check if nvrtc.lib already exists
+          if (Test-Path $dstPath) {
+            Write-Host "nvrtc.lib already exists at $dstPath"
+          } else {
+            # Try to find a versioned nvrtc library to copy
+            # Check multiple patterns: nvrtc64_*.lib, nvrtc_*.lib, or any nvrtc*.lib with version numbers
+            $nvrtcSrc = Get-ChildItem -Path $cudaLib -Filter "nvrtc64_*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -eq $nvrtcSrc) {
+              $nvrtcSrc = Get-ChildItem -Path $cudaLib -Filter "nvrtc_*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+            if ($null -eq $nvrtcSrc) {
+              # Try broader pattern for any versioned nvrtc lib
+              $nvrtcSrc = Get-ChildItem -Path $cudaLib -Filter "nvrtc*[0-9].lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+
+            if ($null -ne $nvrtcSrc) {
+              Copy-Item $nvrtcSrc.FullName $dstPath -Force
+              Write-Host "Created nvrtc.lib at $dstPath from $($nvrtcSrc.Name)"
+            } else {
+              Write-Error "ERROR: No NVRTC import library found in $cudaLib. The CUDA nvrtc_dev component may not have installed correctly."
+              Write-Host "Available libs:"
+              Get-ChildItem "$cudaLib\*.lib" | ForEach-Object { Write-Host "  $($_.Name)" }
+              exit 1
+            }
+          }
+
+          # Verify nvrtc.lib exists
+          if (Test-Path $dstPath) {
+            Write-Host "SUCCESS: nvrtc.lib is ready at $dstPath"
+          } else {
+            Write-Error "FATAL: nvrtc.lib still does not exist at $dstPath"
+            exit 1
+          }
+
+      # Set up MSVC environment for CUDA on Windows
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows' && matrix.install-cuda
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Merge all cuDNN component libraries into cudnn.lib (cudarc only links cudnn.lib)
+      - name: Merge cuDNN libs (Windows)
+        if: runner.os == 'Windows' && matrix.install-cuda
+        shell: pwsh
+        run: |
+          $cudaLib = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64"
+          $cudnnLib = Join-Path $cudaLib "cudnn.lib"
+          $backup = Join-Path $cudaLib "cudnn_original.lib"
+
+          # First, backup the original cudnn.lib
+          if (Test-Path $cudnnLib) {
+            Copy-Item $cudnnLib $backup -Force
+            Write-Host "Backed up original cudnn.lib to cudnn_original.lib"
+          } else {
+            Write-Error "FATAL: cudnn.lib not found at $cudnnLib"
+            exit 1
+          }
+
+          # Collect all cuDNN component libs (excluding cudnn.lib itself, we'll use the backup)
+          $componentLibs = Get-ChildItem -Path $cudaLib -Filter "cudnn*.lib" |
+            Where-Object { $_.Name -ne "cudnn.lib" -and $_.Name -ne "cudnn_original.lib" } |
+            Select-Object -ExpandProperty FullName
+
+          Write-Host "Found $($componentLibs.Count) cuDNN component libs:"
+          $componentLibs | ForEach-Object { Write-Host "  $_" }
+
+          if ($componentLibs.Count -eq 0) {
+            Write-Host "WARNING: No component libs found, cudnn.lib may be missing version check symbols"
+            exit 0
+          }
+
+          # Merge: original cudnn.lib + all component libs -> new cudnn.lib
+          $allInputLibs = @($backup) + $componentLibs
+          $libArgs = @("/OUT:$cudnnLib") + $allInputLibs
+
+          Write-Host "Running: lib.exe $($libArgs -join ' ')"
+          & lib.exe @libArgs
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "lib.exe failed with exit code $LASTEXITCODE"
+            Copy-Item $backup $cudnnLib -Force
+            Write-Host "Restored original cudnn.lib"
+            exit 1
+          }
+
+          Write-Host "Successfully merged cuDNN libs into cudnn.lib"
+
+          # Check if version check symbols exist (they don't in cuDNN 8.9.x)
+          Write-Host "Checking for version check symbols in merged cudnn.lib..."
+          $dumpOutput = & dumpbin /LINKERMEMBER $cudnnLib 2>&1 | Out-String
+          $hasAdvCheck = $dumpOutput -match "cudnnAdvVersionCheck"
+          $hasCnnCheck = $dumpOutput -match "cudnnCnnVersionCheck"
+          $hasOpsCheck = $dumpOutput -match "cudnnOpsVersionCheck"
+
+          Write-Host "Symbol check results:"
+          Write-Host "  cudnnAdvVersionCheck: $hasAdvCheck"
+          Write-Host "  cudnnCnnVersionCheck: $hasCnnCheck"
+          Write-Host "  cudnnOpsVersionCheck: $hasOpsCheck"
+
+          if (-not ($hasAdvCheck -and $hasCnnCheck -and $hasOpsCheck)) {
+            Write-Host "NOTE: Version check symbols not found in cuDNN 8.9.x - will be provided by shim library"
+          } else {
+            Write-Host "Version check symbols found in merged cudnn.lib"
+          }
+
+      # Build cuDNN version check shim (Windows)
+      # cuDNN 8.9.x removed cudnnAdvVersionCheck, cudnnCnnVersionCheck, cudnnOpsVersionCheck
+      # but cudarc still references them. This shim provides stub implementations.
+      - name: Build cuDNN version shim (Windows)
+        if: runner.os == 'Windows' && matrix.install-cuda
+        shell: pwsh
+        working-directory: vibevoice-tauri
+        run: |
+          Write-Host "Building cuDNN version check shim library..."
+
+          # Compile the shim
+          cl /nologo /c /EHsc cudnn_version_shim.c
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to compile cudnn_version_shim.c"
+            exit 1
+          }
+
+          # Create import library
+          lib /nologo /OUT:cudnn_version_shim.lib cudnn_version_shim.obj
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to create cudnn_version_shim.lib"
+            exit 1
+          }
+
+          # Verify symbols are exported
+          Write-Host "Verifying shim exports:"
+          & dumpbin /SYMBOLS cudnn_version_shim.obj | Select-String "cudnn"
+
+          # Merge shim into cudnn.lib so linker finds symbols automatically
+          $cudaLib = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\lib\x64"
+          $cudnnLib = Join-Path $cudaLib "cudnn.lib"
+          $shimLib = "cudnn_version_shim.lib"
+
+          Write-Host "Merging shim into cudnn.lib..."
+          $tempLib = Join-Path $cudaLib "cudnn_with_shim.lib"
+          & lib /nologo /OUT:$tempLib $cudnnLib $shimLib
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to merge shim into cudnn.lib"
+            exit 1
+          }
+
+          # Replace original with merged version
+          Remove-Item $cudnnLib -Force
+          Move-Item $tempLib $cudnnLib -Force
+          Write-Host "Successfully merged shim into cudnn.lib"
+
+          # Verify the shim symbols are now in cudnn.lib
+          Write-Host "Verifying cudnn.lib now contains version check symbols:"
+          $dumpOutput = & dumpbin /LINKERMEMBER $cudnnLib 2>&1 | Out-String
+          $hasAdvCheck = $dumpOutput -match "cudnnAdvVersionCheck"
+          $hasCnnCheck = $dumpOutput -match "cudnnCnnVersionCheck"
+          $hasOpsCheck = $dumpOutput -match "cudnnOpsVersionCheck"
+          Write-Host "  cudnnAdvVersionCheck: $hasAdvCheck"
+          Write-Host "  cudnnCnnVersionCheck: $hasCnnCheck"
+          Write-Host "  cudnnOpsVersionCheck: $hasOpsCheck"
+
+          if ($hasAdvCheck -and $hasCnnCheck -and $hasOpsCheck) {
+            Write-Host "SUCCESS: All version check symbols now available in cudnn.lib"
+          } else {
+            Write-Error "FATAL: Shim symbols not found in merged cudnn.lib"
+            exit 1
+          }
+
+      # Install Rust
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cache Rust dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.artifact-name }}
+          cache-on-failure: true
+
+      # Install Tauri CLI
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # Set cross-compilation environment for Linux ARM64
+      - name: Set cross-compilation environment (Linux ARM64)
+        if: runner.os == 'Linux' && matrix.cross
+        run: |
+          echo "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      # Link CUDA driver stubs for linuxdeploy (Linux with CUDA)
+      # The CUDA driver library (libcuda.so.1) must come from the user's host system,
+      # not the AppImage. The CUDA toolkit includes stub libraries for build/link purposes.
+      # We symlink these to the system lib directory so linuxdeploy can find them.
+      - name: Link CUDA driver stubs for AppImage (Linux)
+        if: runner.os == 'Linux' && matrix.install-cuda
+        run: |
+          # CUDA toolkit installs stubs at this location
+          CUDA_STUBS="/usr/local/cuda-12.4/targets/x86_64-linux/lib/stubs"
+
+          if [ -f "$CUDA_STUBS/libcuda.so" ]; then
+            echo "Found CUDA stubs at $CUDA_STUBS"
+            # Create versioned symlink that linuxdeploy looks for
+            sudo ln -sf "$CUDA_STUBS/libcuda.so" /usr/lib/x86_64-linux-gnu/libcuda.so.1
+            sudo ln -sf "$CUDA_STUBS/libcuda.so" /usr/lib/x86_64-linux-gnu/libcuda.so
+            echo "Created libcuda.so.1 symlink"
+          else
+            echo "CUDA stubs not found at expected location, listing available:"
+            find /usr/local/cuda* -name "libcuda*" 2>/dev/null || true
+            # Fallback: create a minimal stub .so using gcc
+            echo 'void __attribute__((visibility("default"))) cuInit(void) {}' | \
+              gcc -x c -shared -fPIC -o /tmp/libcuda_stub.so -
+            sudo mv /tmp/libcuda_stub.so /usr/lib/x86_64-linux-gnu/libcuda.so.1
+            sudo ln -sf /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so
+            echo "Created minimal stub libcuda.so.1"
+          fi
+
+          # Update ldconfig cache so linuxdeploy can find the library
+          sudo ldconfig
+
+          # Verify the library is now findable
+          echo "Checking ldconfig for libcuda:"
+          ldconfig -p | grep libcuda || echo "Warning: libcuda not in ldconfig cache"
+          ls -la /usr/lib/x86_64-linux-gnu/libcuda* || true
+
+      # Build Tauri app (native)
+      - name: Build Tauri app (native)
+        if: "!matrix.cross"
+        run: cargo tauri build --config tauri.conf.ci.json --verbose ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+        working-directory: vibevoice-tauri
+        env:
+          # Allow linuxdeploy to run without FUSE (required for AppImage in CI)
+          APPIMAGE_EXTRACT_AND_RUN: 1
+
+      # Debug linuxdeploy if build failed (Linux only)
+      - name: Debug linuxdeploy
+        if: failure() && runner.os == 'Linux' && !matrix.cross
+        run: |
+          echo "=== Checking linuxdeploy cache ==="
+          ls -la ~/.cache/tauri || true
+
+          linuxdeploy="$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage"
+          if [ -f "$linuxdeploy" ]; then
+            echo "=== linuxdeploy file info ==="
+            file "$linuxdeploy"
+
+            echo "=== Trying to run linuxdeploy --help ==="
+            chmod +x "$linuxdeploy"
+            "$linuxdeploy" --help 2>&1 || echo "linuxdeploy failed with code $?"
+
+            echo "=== Trying with --appimage-extract-and-run ==="
+            "$linuxdeploy" --appimage-extract-and-run --help 2>&1 || echo "extract-and-run failed with code $?"
+          else
+            echo "linuxdeploy AppImage not found at $linuxdeploy"
+          fi
+
+          echo "=== Checking for appimagetool ==="
+          ls -la ~/.cache/tauri/*appimage* 2>/dev/null || true
+
+      # Build Tauri app (cross-compiled Linux - skip AppImage since linuxdeploy can't run on x86)
+      - name: Build Tauri app (cross Linux)
+        if: matrix.cross && runner.os == 'Linux'
+        run: cargo tauri build --config tauri.conf.ci.json --target ${{ matrix.target }} --bundles deb,rpm ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+        working-directory: vibevoice-tauri
+
+      # Build Tauri app (cross-compiled Windows)
+      - name: Build Tauri app (cross Windows)
+        if: matrix.cross && runner.os == 'Windows'
+        run: cargo tauri build --config tauri.conf.ci.json --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+        working-directory: vibevoice-tauri
+
+      # Upload build artifacts (Linux native)
+      - name: Upload Linux artifacts (native)
+        if: runner.os == 'Linux' && !matrix.cross
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/rpm/*.rpm
+          retention-days: 1
+
+      # Upload build artifacts (Linux cross-compiled - no AppImage)
+      - name: Upload Linux artifacts (cross)
+        if: runner.os == 'Linux' && matrix.cross
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/deb/*.deb
+            target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+          retention-days: 1
+
+      # Upload build artifacts (Windows native)
+      - name: Upload Windows artifacts (native)
+        if: runner.os == 'Windows' && !matrix.cross
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+          retention-days: 1
+
+      # Upload build artifacts (Windows cross-compiled)
+      - name: Upload Windows artifacts (cross)
+        if: runner.os == 'Windows' && matrix.cross
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: |
+            target/${{ matrix.target }}/release/bundle/msi/*.msi
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe
+          retention-days: 1
+
+      # Upload build artifacts (macOS)
+      - name: Upload macOS artifacts
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: target/release/bundle/dmg/*.dmg
+          retention-days: 1
+
+  # Fan-in job: Collect all artifacts and attach to release
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # Pattern matches artifact names like linux-x86_64, windows-aarch64, macos-aarch64
+          # but excludes web-dist (which is only used internally by the build)
+          pattern: '*-*'
+          merge-multiple: false
+
+      - name: Collect release assets
+        id: collect
+        run: |
+          mkdir -p release-assets
+          # Flatten all installer files into release-assets/
+          find artifacts -type f \( \
+            -name "*.deb" -o \
+            -name "*.rpm" -o \
+            -name "*.AppImage" -o \
+            -name "*.msi" -o \
+            -name "*.exe" -o \
+            -name "*.dmg" \
+          \) -exec cp {} release-assets/ \;
+
+          echo "=== Release assets ==="
+          ls -la release-assets/
+
+          # Count assets for conditional upload
+          count=$(ls -1 release-assets/ 2>/dev/null | wc -l)
+          echo "asset_count=$count" >> $GITHUB_OUTPUT
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::No release assets found - build jobs may have failed"
+          else
+            echo "Found $count release assets"
+          fi
+
+      - name: Attach artifacts to release
+        if: steps.collect.outputs.asset_count != '0'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

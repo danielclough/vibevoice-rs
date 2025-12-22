@@ -56,7 +56,7 @@ gpu = ["vibevoice-server/gpu", "vibevoice/gpu"]
 # Platform convenience features
 macos = ["metal", "accelerate"]
 linux-gpu = ["cuda", "cudnn", "flash-attn"]
-windows-gpu = ["cuda", "cudnn"]
+windows-gpu = ["cuda", "cudnn", "flash-attn"]
 
 # Development features
 devtools = ["tauri/devtools"]
