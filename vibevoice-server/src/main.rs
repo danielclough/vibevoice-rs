@@ -23,11 +23,11 @@ async fn main() -> anyhow::Result<()> {
         Config::default()
     };
 
-    if let Some(ref dir) = config.voices_dir {
-        info!("Voices directory: {}", dir.display());
+    if let Some(ref dir) = config.safetensors_dir {
+        info!("Safetensors directory: {}", dir.display());
     }
-    if let Some(ref dir) = config.samples_dir {
-        info!("Samples directory: {}", dir.display());
+    if let Some(ref dir) = config.wav_dir {
+        info!("WAV samples directory: {}", dir.display());
     }
     if let Some(ref dir) = config.output_dir {
         info!("Output directory: {}", dir.display());

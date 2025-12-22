@@ -9,7 +9,7 @@ use std::path::Path;
 pub struct AudioData {
     /// Raw audio samples (normalized -1.0 to 1.0)
     samples: Vec<f32>,
-    /// Sample rate in Hz (typically 24000)
+    /// WavSample rate in Hz (typically 24000)
     sample_rate: u32,
 }
 
@@ -176,7 +176,7 @@ impl AudioData {
         for chunk in chunks {
             if chunk.sample_rate != sample_rate {
                 return Err(VibeVoiceError::AudioError(format!(
-                    "Sample rate mismatch: {} vs {}",
+                    "WavSample rate mismatch: {} vs {}",
                     chunk.sample_rate, sample_rate
                 )));
             }

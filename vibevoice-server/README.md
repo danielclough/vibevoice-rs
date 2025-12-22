@@ -24,18 +24,25 @@ Create a `config.yaml` file (see `config.example.yaml`):
 host: 0.0.0.0
 port: 3908
 
-# Directory containing voice .safetensors files (realtime model)
-voices_dir: /path/to/voices/streaming_model
+# Directory containing .safetensors voice files (for realtime model)
+safetensors_dir: /path/to/voices/streaming_model
 
-# Directory containing .wav samples for cloning (batch models)
-samples_dir: /path/to/wav/samples
+# Directory containing .wav sample files (for batch models)
+wav_dir: /path/to/wav/samples
 
 # Optional output directory
 output_dir: /path/to/output
 
 # Directory containing built vibevoice-web frontend to serve at /
 web_dir: /path/to/vibevoice-web/dist
+
+# CORS allowed origins (defaults to localhost only)
+cors_origins:
+  - "http://localhost"
+  - "http://127.0.0.1"
 ```
+
+The config file format is shared with `vibevoice-tauri` (desktop app). The desktop app adds an optional `desktop:` section for app-specific settings which is ignored by the CLI server.
 
 ## Running
 
@@ -234,11 +241,12 @@ The `voice` field in requests can be:
    {"voice": "/full/path/to/voice.safetensors"}
    ```
 
-2. **Voice name**: Resolved from `voices_dir` or `samples_dir`
+2. **Voice name**: Resolved from `safetensors_dir` or `wav_dir` based on model type
    ```json
    {"voice": "en-Emma_woman"}
    ```
-   Tries: `voices_dir/en-Emma_woman.safetensors`, then `samples_dir/en-Emma_woman.wav`
+   - Realtime model: looks in `safetensors_dir/en-Emma_woman.safetensors`
+   - Batch models: looks in `wav_dir/en-Emma_woman.wav`
 
 ## Runtime Model Switching
 

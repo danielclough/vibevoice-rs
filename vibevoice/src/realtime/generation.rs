@@ -26,7 +26,7 @@
 //!
 //! From `modeling_vibevoice_streaming_inference.py:525-704`
 
-use crate::{realtime::{binary_classifier::BinaryClassifier, config::{RealtimeConfig}, split_llm::DualSplitLLM, voice_cache::VoiceCache}, streaming_cache::StreamingCache};
+use crate::{realtime::{binary_classifier::BinaryClassifier, config::{RealtimeConfig}, split_llm::DualSplitLLM, voice_cache::SafetensorCache}, streaming_cache::StreamingCache};
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use tracing::debug;
@@ -91,7 +91,7 @@ pub struct GenerationState {
 
 impl GenerationState {
     /// Initialize generation state from a voice cache.
-    pub fn from_voice_cache(voice_cache: &VoiceCache, device: &Device) -> Result<Self> {
+    pub fn from_voice_cache(voice_cache: &SafetensorCache, device: &Device) -> Result<Self> {
         let (lm_len, tts_lm_len, neg_lm_len, neg_tts_lm_len) = voice_cache.cache_positions()?;
 
         debug!(
@@ -199,7 +199,7 @@ impl WindowedGenerator {
     /// into both the generator state and the DualSplitLLM (all 4 caches).
     pub fn initialize_from_cache(
         &mut self,
-        voice_cache: &VoiceCache,
+        voice_cache: &SafetensorCache,
         dual_split_llm: &mut DualSplitLLM,
     ) -> Result<()> {
         // Update state from voice cache

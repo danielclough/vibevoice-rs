@@ -1,0 +1,58 @@
+# VibeVoice Configuration
+#
+# This unified config file works for both:
+# - vibevoice-server (CLI): vibevoice-server --config config.yaml
+# - vibevoice-tauri (Desktop): Auto-loaded from platform config directory
+
+# =============================================================================
+# Server Settings (used by both CLI and desktop app)
+# =============================================================================
+
+# Server binding
+host: 0.0.0.0
+port: 3908
+
+# Directory containing .safetensors voice files (for realtime model)
+# Voice names in API requests will be resolved from this directory
+# e.g. "en-Emma_woman" -> "/path/to/safetensors/en-Emma_woman.safetensors"
+safetensors_dir: /Users/daniel/git/vibevoice-rs/voices/streaming_model
+
+# Directory containing .wav sample files (for batch models)
+wav_dir: /Users/daniel/git/vibevoice-rs/voices/
+
+# Optional directory to save output WAV files
+output_dir: /Users/daniel/git/vibevoice-rs/output/
+
+# Directory containing built vibevoice-web frontend to serve at /
+# (Only used by standalone server, not desktop app)
+web_dir: /Users/daniel/git/vibevoice-rs/vibevoice-web/dist
+
+# CORS allowed origins (defaults to localhost only)
+# Use ["*"] to allow all origins
+cors_origins:
+  - "http://localhost"
+  - "http://127.0.0.1"
+  - "http://192.168.1.11"
+
+# =============================================================================
+# Desktop Settings (used by Tauri app only, ignored by CLI server)
+# =============================================================================
+
+desktop:
+  # Use embedded server (true) or connect to remote server (false)
+  embedded_server: true
+
+  # Remote server URL (used when embedded_server is false)
+  remote_server_url: "http://192.168.1.11:3908"
+
+  # Default model: "realtime", "1.5B", or "7B"
+  default_model: "realtime"
+
+  # Global hotkey to show window
+  hotkey_show: "CommandOrControl+Shift+V"
+
+  # Start minimized to system tray
+  start_minimized: false
+
+  # Show notifications when synthesis completes
+  show_notifications: true

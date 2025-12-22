@@ -31,7 +31,7 @@ pub fn VoiceSelector(
         if model.get().uses_voices() {
             "Voice"
         } else {
-            "Voice Sample"
+            "Voice WavSample"
         }
     };
 

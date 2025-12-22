@@ -15,17 +15,17 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VoiceType {
     /// .wav files for batch models
-    Sample,
+    WavSample,
     /// .safetensors files for realtime model
-    VoiceCache,
+    SafetensorCache,
 }
 
 impl VoiceType {
     /// Returns the file extension for this voice type.
     pub fn extension(&self) -> &'static str {
         match self {
-            VoiceType::Sample => "wav",
-            VoiceType::VoiceCache => "safetensors",
+            VoiceType::WavSample => "wav",
+            VoiceType::SafetensorCache => "safetensors",
         }
     }
 }
@@ -33,8 +33,8 @@ impl VoiceType {
 /// Detect voice type from file extension.
 pub fn detect_voice_type(path: &str) -> Option<VoiceType> {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
-        Some("safetensors") => Some(VoiceType::VoiceCache),
-        Some("wav") => Some(VoiceType::Sample),
+        Some("safetensors") => Some(VoiceType::SafetensorCache),
+        Some("wav") => Some(VoiceType::WavSample),
         _ => None,
     }
 }

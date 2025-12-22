@@ -113,7 +113,7 @@ impl CacheEntry {
 /// output = negative + cfg_scale * (positive - negative)
 /// ```
 #[derive(Debug, Clone)]
-pub struct VoiceCache {
+pub struct SafetensorCache {
     /// Lower LM cache (4 layers) - positive path
     pub lm: CacheEntry,
 
@@ -127,7 +127,7 @@ pub struct VoiceCache {
     pub neg_tts_lm: CacheEntry,
 }
 
-impl VoiceCache {
+impl SafetensorCache {
     /// Load voice cache from a safetensors file.
     ///
     /// # Arguments
@@ -138,7 +138,7 @@ impl VoiceCache {
     /// # Example
     ///
     /// ```ignore
-    /// let cache = VoiceCache::from_safetensors("voice.safetensors", &device)?;
+    /// let cache = SafetensorCache::from_safetensors("voice.safetensors", &device)?;
     /// println!("LM seq_len: {}", cache.lm.seq_len()?);
     /// println!("LM layers: {}", cache.lm.num_layers());
     /// ```

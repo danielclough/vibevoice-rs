@@ -5,7 +5,13 @@ use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 
 use crate::api::client::fetch_voices;
+use crate::components::settings::Settings;
 use crate::tauri;
+
+/// Check if running in Tauri environment (synchronous check at component creation).
+fn check_is_tauri() -> bool {
+    tauri::is_tauri()
+}
 
 /// A hosted server option
 #[derive(Debug, Clone)]
@@ -40,12 +46,11 @@ pub fn ServerSetup(
 ) -> impl IntoView {
     let connection_state = RwSignal::new(ConnectionState::Idle);
     let custom_url = RwSignal::new(String::new());
-    let is_tauri = RwSignal::new(false);
-
-    // Check if running in Tauri on mount
-    spawn_local(async move {
-        is_tauri.set(tauri::is_tauri());
-    });
+    // Check if running in Tauri synchronously at component creation
+    let is_tauri = check_is_tauri();
+    // Settings modal state for local server setup
+    let settings_open = RwSignal::new(false);
+    let server_url = RwSignal::new(String::new());
 
     // Try to connect to a server URL
     let try_connect = {
@@ -57,6 +62,13 @@ pub fn ServerSetup(
             spawn_local(async move {
                 match fetch_voices(&url).await {
                     Ok(_) => {
+                        // Save config to persist the remote server URL
+                        if let Some(mut config) = tauri::get_config().await {
+                            let desktop = config.desktop.get_or_insert_with(Default::default);
+                            desktop.embedded_server = false;
+                            desktop.remote_server_url = Some(url.clone());
+                            let _ = tauri::save_config(&config).await;
+                        }
                         connection_state.set(ConnectionState::Connected);
                         on_connected.run(url);
                     }
@@ -81,27 +93,9 @@ pub fn ServerSetup(
         try_connect_clone(url);
     };
 
-    // Handle starting local server (Tauri only)
-    let on_start_local = {
-        let on_connected = on_connected.clone();
-        move |_| {
-            connection_state.set(ConnectionState::StartingLocal);
-            let on_connected = on_connected.clone();
-
-            spawn_local(async move {
-                match tauri::start_embedded_server().await {
-                    Some(url) => {
-                        connection_state.set(ConnectionState::Connected);
-                        on_connected.run(url);
-                    }
-                    None => {
-                        connection_state.set(ConnectionState::Failed(
-                            "Failed to start local server".to_string(),
-                        ));
-                    }
-                }
-            });
-        }
+    // Handle starting local server (Tauri only) - opens Settings modal
+    let on_start_local = move |_| {
+        settings_open.set(true);
     };
 
     let is_busy = Memo::new(move |_| {
@@ -150,7 +144,7 @@ pub fn ServerSetup(
                 </div>
 
                 // Local server section (Tauri only)
-                <Show when=move || is_tauri.get()>
+                <Show when=move || is_tauri>
                     <div class="setup-divider">
                         <span>"or"</span>
                     </div>
@@ -158,6 +152,15 @@ pub fn ServerSetup(
                         connection_state=connection_state.into()
                         is_busy=is_busy
                         on_start=on_start_local
+                    />
+
+                    // Settings modal for local server configuration
+                    <Settings
+                        is_open=settings_open
+                        server_url=server_url
+                        on_server_change=Callback::new(|_| {})
+                        setup_mode=true
+                        on_setup_complete=on_connected.clone()
                     />
                 </Show>
             </div>

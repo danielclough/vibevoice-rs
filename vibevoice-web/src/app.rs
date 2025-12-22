@@ -4,24 +4,24 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api::client::{fetch_voices, synthesize_json};
-use crate::tauri;
-use crate::storage;
-use crate::storage::history::HistoryEntry;
-use crate::storage::templates::TextTemplate;
 use crate::components::audio_history::AudioHistory;
 use crate::components::audio_player::AudioPlayer;
 use crate::components::batch_processor::BatchProcessor;
 use crate::components::model_selector::{Model, ModelSelector};
 use crate::components::progress::Progress;
-use crate::components::server_config::ServerConfig;
 use crate::components::server_setup::ServerSetup;
+use crate::components::settings::{Settings, SettingsButton};
 use crate::components::sidebar::Sidebar;
 use crate::components::synth_button::SynthButton;
 use crate::components::text_input::TextInput;
 use crate::components::text_templates::TextTemplates;
-use crate::components::toast::{show_toast, ToastContainer, ToastMessage, ToastType};
+use crate::components::toast::{ToastContainer, ToastMessage, ToastType, show_toast};
 use crate::components::voice_selector::VoiceSelector;
-use crate::sse::stream::{start_streaming, SseEvent, StreamingState};
+use crate::sse::stream::{SseEvent, StreamingState, start_streaming};
+use crate::storage;
+use crate::storage::history::HistoryEntry;
+use crate::storage::templates::TextTemplate;
+use crate::tauri;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -61,6 +61,8 @@ pub fn App() -> impl IntoView {
     let sidebar_open = RwSignal::new(true);
     let toasts = RwSignal::new(Vec::<ToastMessage>::new());
     let batch_mode = RwSignal::new(false);
+    let settings_open = RwSignal::new(false);
+    let starting_local_server = RwSignal::new(false);
 
     // Voice lists
     let voices = RwSignal::new(Vec::<String>::new());
@@ -87,23 +89,133 @@ pub fn App() -> impl IntoView {
                     samples.set(response.samples);
                 }
                 Err(e) => {
-                    show_toast(toasts, &format!("Failed to fetch voices: {}", e), ToastType::Error);
+                    show_toast(
+                        toasts,
+                        &format!("Failed to fetch voices: {}", e),
+                        ToastType::Error,
+                    );
                 }
             }
         });
     };
 
-    // On mount: try to auto-connect to saved server
-    if let Some(saved_url) = saved_server {
+    // On mount: handle startup based on environment
+    let is_tauri_env = tauri::is_tauri();
+    web_sys::console::log_1(&format!("[app] is_tauri_env: {}", is_tauri_env).into());
+    web_sys::console::log_1(&format!("[app] saved_server: {:?}", saved_server).into());
+
+    if is_tauri_env {
+        // Tauri: Use config to determine startup behavior
         spawn_local(async move {
-            // Try to connect to the saved server
+            web_sys::console::log_1(&"[app] tauri startup: getting config".into());
+            if let Some(config) = tauri::get_config().await {
+                let desktop = config.desktop_settings();
+                web_sys::console::log_1(&format!("[app] config received: embedded={}, remote={:?}",
+                    desktop.embedded_server, desktop.remote_server_url).into());
+                if desktop.embedded_server {
+                    // Auto-start embedded server
+                    web_sys::console::log_1(&"[app] starting embedded server".into());
+                    starting_local_server.set(true);
+                    is_connecting.set(false);
+                    show_setup.set(false);
+
+                    match tauri::start_embedded_server().await {
+                        Ok(url) => {
+                            server_url.set(url.clone());
+                            let _ = LocalStorage::set(storage::STORAGE_LAST_SERVER, &url);
+                            let _ = LocalStorage::set(storage::STORAGE_SERVER_URL, &url);
+
+                            // Fetch voices
+                            match fetch_voices(&url).await {
+                                Ok(response) => {
+                                    let current_model = model.get_untracked();
+                                    let first_voice = if current_model.uses_voices() {
+                                        response.voices.first().cloned()
+                                    } else {
+                                        response.samples.first().cloned()
+                                    };
+                                    if let Some(v) = first_voice {
+                                        selected_voice.set(v);
+                                    }
+                                    voices.set(response.voices);
+                                    samples.set(response.samples);
+                                }
+                                Err(e) => {
+                                    show_toast(
+                                        toasts,
+                                        &format!("Failed to fetch voices: {}", e),
+                                        ToastType::Error,
+                                    );
+                                }
+                            }
+                            starting_local_server.set(false);
+                        }
+                        Err(e) => {
+                            show_toast(
+                                toasts,
+                                &format!("Failed to start server: {}", e),
+                                ToastType::Error,
+                            );
+                            starting_local_server.set(false);
+                            show_setup.set(true);
+                        }
+                    }
+                } else if let Some(remote_url) = desktop.remote_server_url {
+                    // Connect to remote server
+                    is_connecting.set(true);
+                    show_setup.set(false);
+
+                    match fetch_voices(&remote_url).await {
+                        Ok(response) => {
+                            server_url.set(remote_url.clone());
+                            let _ = LocalStorage::set(storage::STORAGE_LAST_SERVER, &remote_url);
+                            let _ = LocalStorage::set(storage::STORAGE_SERVER_URL, &remote_url);
+
+                            let current_model = model.get_untracked();
+                            let first_voice = if current_model.uses_voices() {
+                                response.voices.first().cloned()
+                            } else {
+                                response.samples.first().cloned()
+                            };
+                            if let Some(v) = first_voice {
+                                selected_voice.set(v);
+                            }
+                            voices.set(response.voices);
+                            samples.set(response.samples);
+                            is_connecting.set(false);
+                        }
+                        Err(e) => {
+                            show_toast(
+                                toasts,
+                                &format!("Failed to connect: {}", e),
+                                ToastType::Error,
+                            );
+                            is_connecting.set(false);
+                            show_setup.set(true);
+                        }
+                    }
+                } else {
+                    // No server configured - show setup wizard
+                    web_sys::console::log_1(&"[app] no server configured, showing wizard".into());
+                    is_connecting.set(false);
+                    show_setup.set(true);
+                }
+            } else {
+                // Failed to get config - show setup wizard
+                web_sys::console::log_1(&"[app] config was None, showing wizard".into());
+                is_connecting.set(false);
+                show_setup.set(true);
+            }
+        });
+    } else if let Some(saved_url) = saved_server {
+        web_sys::console::log_1(&"[app] browser mode with saved URL".into());
+        // Browser: Use localStorage-based startup
+        spawn_local(async move {
             match fetch_voices(&saved_url).await {
                 Ok(response) => {
-                    // Success - we're connected
                     server_url.set(saved_url.clone());
                     let _ = LocalStorage::set(storage::STORAGE_SERVER_URL, &saved_url);
 
-                    // Auto-select first voice
                     let current_model = model.get_untracked();
                     let first_voice = if current_model.uses_voices() {
                         response.voices.first().cloned()
@@ -120,7 +232,6 @@ pub fn App() -> impl IntoView {
                     show_setup.set(false);
                 }
                 Err(_) => {
-                    // Failed to connect - show setup wizard
                     is_connecting.set(false);
                     show_setup.set(true);
                 }
@@ -169,7 +280,11 @@ pub fn App() -> impl IntoView {
         let streaming = use_streaming.get_untracked();
 
         if txt.trim().is_empty() {
-            show_toast(toasts, "Please enter some text to synthesize", ToastType::Error);
+            show_toast(
+                toasts,
+                "Please enter some text to synthesize",
+                ToastType::Error,
+            );
             return;
         }
 
@@ -205,7 +320,8 @@ pub fn App() -> impl IntoView {
                         _ => {}
                     }
                     state.apply_event(event);
-                }).await;
+                })
+                .await;
 
                 is_loading.set(false);
                 progress.set(None);
@@ -259,7 +375,8 @@ pub fn App() -> impl IntoView {
                                     text: txt.clone(),
                                     voice: voice.clone(),
                                     model: m.as_str().to_string(),
-                                    audio_b64: base64::engine::general_purpose::STANDARD.encode(&wav_bytes),
+                                    audio_b64: base64::engine::general_purpose::STANDARD
+                                        .encode(&wav_bytes),
                                     server_url: url.clone(),
                                 };
                                 audio_history.update(|h| {
@@ -268,7 +385,11 @@ pub fn App() -> impl IntoView {
                                 });
                             }
                             Err(e) => {
-                                show_toast(toasts, &format!("Failed to decode audio: {}", e), ToastType::Error);
+                                show_toast(
+                                    toasts,
+                                    &format!("Failed to decode audio: {}", e),
+                                    ToastType::Error,
+                                );
                             }
                         }
                     }
@@ -292,13 +413,22 @@ pub fn App() -> impl IntoView {
                 </div>
             </Show>
 
+            // Show starting local server state
+            <Show when=move || starting_local_server.get()>
+                <div class="connecting-screen">
+                    <h1>"VibeVoice"</h1>
+                    <p>"Starting local server..."</p>
+                    <p class="connecting-detail">"This may take a moment while the model loads."</p>
+                </div>
+            </Show>
+
             // Show setup wizard if no server connected
-            <Show when=move || show_setup.get() && !is_connecting.get()>
+            <Show when=move || show_setup.get() && !is_connecting.get() && !starting_local_server.get()>
                 <ServerSetup on_connected=on_server_connected />
             </Show>
 
             // Show main app when connected
-            <Show when=move || !show_setup.get() && !is_connecting.get()>
+            <Show when=move || !show_setup.get() && !is_connecting.get() && !starting_local_server.get()>
                 <header class="app-header">
                     <div class="logo-section">
                         <div class="app-logo" role="img" aria-label="VibeVoice logo"></div>
@@ -307,7 +437,9 @@ pub fn App() -> impl IntoView {
                             <p class="tagline">"Text-to-Speech Synthesis"</p>
                         </div>
                     </div>
+                    <SettingsButton on_click=Callback::new(move |_: ()| settings_open.set(true)) />
                 </header>
+
 
                 <div class="main-layout">
                     // Sidebar with history and batch mode toggle
@@ -320,6 +452,13 @@ pub fn App() -> impl IntoView {
                             {move || if batch_mode.get() { "Single Mode" } else { "Batch Mode" }}
                         </button>
 
+                        // Settings modal
+                        <Settings
+                            is_open=settings_open
+                            server_url=server_url
+                            on_server_change=on_server_change.clone()
+                        />
+                        
                         <AudioHistory
                             history=audio_history.into()
                             current_server_url=server_url.into()
@@ -344,7 +483,6 @@ pub fn App() -> impl IntoView {
                     // Main content area
                     <main class="main-content">
                         <div class="panel config-panel">
-                            <ServerConfig server_url=server_url on_change=on_server_change />
                             <ModelSelector model=model on_change=on_model_change />
                             <VoiceSelector
                                 model=model.into()

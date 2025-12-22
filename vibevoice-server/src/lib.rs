@@ -23,7 +23,8 @@ use vibevoice::{AudioData, Device, ModelVariant, Progress, VibeVoice, VoiceType,
 // =============================================================================
 
 /// Server configuration loaded from YAML file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Host/domain to bind to (default: 0.0.0.0)
     #[serde(default)]
@@ -33,13 +34,13 @@ pub struct Config {
     #[serde(default)]
     pub port: Option<u16>,
 
-    /// Directory containing voice safetensors files (for realtime model)
-    #[serde(default)]
-    pub voices_dir: Option<PathBuf>,
+    /// Directory containing .safetensors voice files (for realtime model)
+    #[serde(default, alias = "voices_dir")]
+    pub safetensors_dir: Option<PathBuf>,
 
-    /// Directory containing WAV samples for voice cloning (for batch models)
-    #[serde(default)]
-    pub samples_dir: Option<PathBuf>,
+    /// Directory containing .wav sample files (for batch models)
+    #[serde(default, alias = "samples_dir")]
+    pub wav_dir: Option<PathBuf>,
 
     /// Optional directory to save output WAV files
     #[serde(default)]
@@ -53,6 +54,46 @@ pub struct Config {
     /// Use ["*"] to allow all origins.
     #[serde(default = "default_cors_origins")]
     pub cors_origins: Vec<String>,
+
+    /// Desktop-specific settings (used by Tauri app, ignored by CLI)
+    #[serde(default)]
+    pub desktop: Option<DesktopSettings>,
+}
+
+/// Desktop application settings (used by Tauri, ignored by CLI server).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DesktopSettings {
+    /// Whether to use the embedded server (true) or remote server (false)
+    pub embedded_server: bool,
+
+    /// Remote server URL (used when embedded_server is false)
+    pub remote_server_url: Option<String>,
+
+    /// Default model variant: "realtime", "1.5B", or "7B"
+    pub default_model: String,
+
+    /// Global hotkey for showing window (e.g., "CommandOrControl+Shift+V")
+    pub hotkey_show: Option<String>,
+
+    /// Start minimized to tray
+    pub start_minimized: bool,
+
+    /// Show notifications on synthesis complete
+    pub show_notifications: bool,
+}
+
+impl Default for DesktopSettings {
+    fn default() -> Self {
+        Self {
+            embedded_server: true,
+            remote_server_url: None,
+            default_model: "realtime".to_string(),
+            hotkey_show: Some("CommandOrControl+Shift+V".to_string()),
+            start_minimized: false,
+            show_notifications: true,
+        }
+    }
 }
 
 fn default_cors_origins() -> Vec<String> {
@@ -67,11 +108,12 @@ impl Default for Config {
         Self {
             host: None,
             port: None,
-            voices_dir: None,
-            samples_dir: None,
+            safetensors_dir: None,
+            wav_dir: None,
             output_dir: None,
             web_dir: None,
             cors_origins: default_cors_origins(),
+            desktop: None,
         }
     }
 }
@@ -84,11 +126,18 @@ impl Config {
         Ok(config)
     }
 
+    /// Save config to YAML file.
+    pub fn to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let yaml = serde_yaml::to_string(self)?;
+        std::fs::write(path, yaml)?;
+        Ok(())
+    }
+
     /// Resolve a voice name to a full path based on model type.
     ///
     /// If the voice is already an absolute path, returns it as-is.
-    /// For Realtime model: looks in voices_dir for .safetensors files.
-    /// For Batch models: looks in samples_dir for .wav files.
+    /// For Realtime model: looks in safetensors_dir for .safetensors files.
+    /// For Batch models: looks in wav_dir for .wav files.
     pub fn resolve_voice(&self, voice: &str, model: ModelVariant) -> String {
         // If it's already an absolute path, use it directly
         if PathBuf::from(voice).is_absolute() {
@@ -96,13 +145,13 @@ impl Config {
         }
 
         let voice_type = match model {
-            ModelVariant::Realtime => VoiceType::VoiceCache,
-            ModelVariant::Batch1_5B | ModelVariant::Batch7B => VoiceType::Sample,
+            ModelVariant::Realtime => VoiceType::SafetensorCache,
+            ModelVariant::Batch1_5B | ModelVariant::Batch7B => VoiceType::WavSample,
         };
 
         let search_dir = match voice_type {
-            VoiceType::VoiceCache => self.voices_dir.as_ref(),
-            VoiceType::Sample => self.samples_dir.as_ref(),
+            VoiceType::SafetensorCache => self.safetensors_dir.as_ref(),
+            VoiceType::WavSample => self.wav_dir.as_ref(),
         };
 
         // Try to resolve directly in the configured directory
@@ -464,8 +513,8 @@ pub async fn list_voices(State(state): State<AppState>) -> Json<VoicesResponse> 
     let mut voices = Vec::new();
     let mut samples = Vec::new();
 
-    // List voices from voices_dir
-    if let Some(ref dir) = state.config.voices_dir {
+    // List .safetensors voices from safetensors_dir
+    if let Some(ref dir) = state.config.safetensors_dir {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -478,8 +527,8 @@ pub async fn list_voices(State(state): State<AppState>) -> Json<VoicesResponse> 
         }
     }
 
-    // List samples from samples_dir
-    if let Some(ref dir) = state.config.samples_dir {
+    // List .wav samples from wav_dir
+    if let Some(ref dir) = state.config.wav_dir {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();

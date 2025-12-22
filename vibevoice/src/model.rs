@@ -1070,7 +1070,7 @@ impl VibeVoiceModel {
         Ok(result)
     }
 
-    /// Sample next token from logits using various sampling strategies
+    /// WavSample next token from logits using various sampling strategies
     fn sample_next_token(&self, logits: &Tensor) -> Result<u32> {
         // Apply token constraints to mask invalid tokens
         let constrained_logits = self.apply_token_constraints(logits)?;
@@ -1352,7 +1352,7 @@ impl VibeVoiceModel {
             let seq_len = logits.dim(1)?;
             let logits_last = logits.i((.., seq_len - 1, ..))?;
 
-            // Sample next token
+            // WavSample next token
             let next_token = self.sample_next_token(&logits_last)?;
 
             // === STOPPING CONDITIONS ===
@@ -1534,7 +1534,7 @@ impl VibeVoiceModel {
                     neg_cond_rms
                 );
 
-                // Step 1: Sample acoustic latent from diffusion
+                // Step 1: WavSample acoustic latent from diffusion
                 // BUGFIX: Use solver.num_steps which is set by set_ddpm_inference_steps(),
                 // not the config value which is never updated
                 let num_steps = self.solver.num_steps;

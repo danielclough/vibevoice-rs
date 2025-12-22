@@ -19,7 +19,7 @@
 //! let model = VibeVoiceRealtimeModel::from_pretrained(&model_path, &device)?;
 //!
 //! // Load voice cache
-//! let voice_cache = VoiceCache::from_safetensors(&voice_path, &device)?;
+//! let voice_cache = SafetensorCache::from_safetensors(&voice_path, &device)?;
 //!
 //! // Generate with streaming
 //! let audio = model.generate(
@@ -39,7 +39,7 @@ use crate::realtime::binary_classifier::BinaryClassifier;
 use crate::realtime::config::{RealtimeConfig, TTS_SPEECH_WINDOW_SIZE};
 use crate::realtime::generation::{GenerationConfig, WindowedGenerator};
 use crate::realtime::split_llm::DualSplitLLM;
-use crate::realtime::voice_cache::VoiceCache;
+use crate::realtime::voice_cache::SafetensorCache;
 use crate::streaming_cache::StreamingCache;
 use crate::utils::{create_realtime_remapped_varbuilder, tensor_stats};
 use crate::pytorch_rng::seeded_randn;
@@ -278,7 +278,7 @@ impl VibeVoiceRealtimeModel {
     pub fn generate<F>(
         &mut self,
         text: &str,
-        voice_cache: &VoiceCache,
+        voice_cache: &SafetensorCache,
         mut audio_callback: F,
     ) -> Result<Tensor>
     where
@@ -370,7 +370,7 @@ impl VibeVoiceRealtimeModel {
                     );
                 }
 
-                // Sample speech latent via diffusion (logs internally for TOKEN 0)
+                // WavSample speech latent via diffusion (logs internally for TOKEN 0)
                 let speech_latent = self.sample_diffusion(
                     &positive_condition,
                     &negative_condition,
@@ -472,7 +472,7 @@ impl VibeVoiceRealtimeModel {
         Ok(audio)
     }
 
-    /// Sample speech latent using DPM-Solver++ with CFG.
+    /// WavSample speech latent using DPM-Solver++ with CFG.
     fn sample_diffusion(
         &self,
         condition: &Tensor,

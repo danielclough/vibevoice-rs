@@ -137,7 +137,7 @@ impl PyTorchNormal {
         (combined & MASK_53BIT) as f64 / DIVISOR
     }
 
-    /// Sample a single value from N(0, 1) using PyTorch's Box-Muller.
+    /// WavSample a single value from N(0, 1) using PyTorch's Box-Muller.
     ///
     /// This method:
     /// 1. Returns cached value if available (no RNG consumption)
@@ -193,7 +193,7 @@ impl PyTorchNormal {
         sample1
     }
 
-    /// Sample with mean and standard deviation.
+    /// WavSample with mean and standard deviation.
     ///
     /// Equivalent to `sample() * std + mean`, matching PyTorch's
     /// `torch.randn(...) * std + mean` pattern.

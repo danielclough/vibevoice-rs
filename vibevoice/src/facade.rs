@@ -1,7 +1,7 @@
 //! High-level VibeVoice API for text-to-speech synthesis.
 
 use crate::{
-    AudioData, Result, VibeVoiceError, model::VibeVoiceModel, processor::VibeVoiceProcessor, pytorch_rng::set_all_seeds, realtime::{model::VibeVoiceRealtimeModel, voice_cache::VoiceCache}, utils::{
+    AudioData, Result, VibeVoiceError, model::VibeVoiceModel, processor::VibeVoiceProcessor, pytorch_rng::set_all_seeds, realtime::{model::VibeVoiceRealtimeModel, voice_cache::SafetensorCache}, utils::{
         create_remapped_varbuilder, download_model_files, download_realtime_model_files,
         get_device, resolve_voice_path, detect_voice_type, VoiceType,
     }, voice_mapper::{VoiceMapper, parse_txt_script}
@@ -150,12 +150,12 @@ impl VibeVoice {
         if let Some(voice) = voice_path {
             if let Some(detected_type) = detect_voice_type(voice) {
                 match (self.variant, detected_type) {
-                    (ModelVariant::Realtime, VoiceType::Sample) => {
+                    (ModelVariant::Realtime, VoiceType::WavSample) => {
                         return Err(VibeVoiceError::VoiceError(
                             "Realtime model requires .safetensors voice cache, not .wav".to_string(),
                         ));
                     }
-                    (ModelVariant::Batch1_5B | ModelVariant::Batch7B, VoiceType::VoiceCache) => {
+                    (ModelVariant::Batch1_5B | ModelVariant::Batch7B, VoiceType::SafetensorCache) => {
                         return Err(VibeVoiceError::VoiceError(
                             "Batch models require .wav voice samples, not .safetensors".to_string(),
                         ));
@@ -312,7 +312,7 @@ impl VibeVoice {
 
         // Load voice samples if provided
         let voice_samples = if let Some(voice_input) = voice_path {
-            let resolved_path = resolve_voice_path(voice_input, None, VoiceType::Sample)
+            let resolved_path = resolve_voice_path(voice_input, None, VoiceType::WavSample)
                 .map_err(|e| VibeVoiceError::VoiceError(e.to_string()))?;
             let all_voices: Vec<PathBuf> = unique_speakers
                 .iter()
@@ -483,10 +483,10 @@ impl VibeVoice {
         })?;
 
         // Resolve voice cache path
-        let resolved_path = resolve_voice_path(cache_path, None, VoiceType::VoiceCache)
+        let resolved_path = resolve_voice_path(cache_path, None, VoiceType::SafetensorCache)
             .map_err(|e| VibeVoiceError::VoiceError(e.to_string()))?;
 
-        let voice_cache = VoiceCache::from_safetensors(
+        let voice_cache = SafetensorCache::from_safetensors(
             resolved_path.to_str().ok_or_else(|| {
                 VibeVoiceError::VoiceError("Invalid voice cache path".to_string())
             })?,

@@ -53,7 +53,7 @@
 //! ```
 
 use crate::realtime::config::RealtimeConfig;
-use crate::realtime::voice_cache::VoiceCache;
+use crate::realtime::voice_cache::SafetensorCache;
 use crate::utils::tensor_stats;
 use anyhow::{Result, anyhow};
 use candle_core::{DType, Device, Module, Tensor};
@@ -520,10 +520,10 @@ impl DualSplitLLM {
         }
     }
 
-    /// Restore KV caches from a VoiceCache.
+    /// Restore KV caches from a SafetensorCache.
     ///
     /// Loads all 4 caches (positive and negative paths) from the voice cache.
-    pub fn restore_from_voice_cache(&mut self, voice_cache: &VoiceCache) {
+    pub fn restore_from_voice_cache(&mut self, voice_cache: &SafetensorCache) {
         let (pos_lm, pos_tts) = voice_cache.positive_caches();
         let (neg_lm, neg_tts) = voice_cache.negative_caches();
 
