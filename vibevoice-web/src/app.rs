@@ -1,9 +1,15 @@
+use base64::Engine;
 use gloo_storage::{LocalStorage, Storage};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api::client::{fetch_voices, synthesize_json};
 use crate::tauri;
+use crate::storage;
+use crate::storage::history::HistoryEntry;
+use crate::storage::templates::TextTemplate;
+use crate::components::audio_history::AudioHistory;
+use crate::components::text_templates::TextTemplates;
 use crate::components::audio_player::AudioPlayer;
 use crate::components::model_selector::{Model, ModelSelector};
 use crate::components::progress::Progress;
@@ -14,22 +20,17 @@ use crate::components::text_input::TextInput;
 use crate::components::voice_selector::VoiceSelector;
 use crate::sse::stream::{start_streaming, SseEvent, StreamingState};
 
-const STORAGE_SERVER_URL: &str = "vibevoice.server_url";
-const STORAGE_LAST_SERVER: &str = "vibevoice.last_server";
-const STORAGE_MODEL: &str = "vibevoice.model";
-const STORAGE_STREAMING: &str = "vibevoice.use_streaming";
-
 #[component]
 pub fn App() -> impl IntoView {
     // Check if we have a saved server from previous session
-    let saved_server: Option<String> = LocalStorage::get(STORAGE_LAST_SERVER).ok();
+    let saved_server: Option<String> = LocalStorage::get(storage::STORAGE_LAST_SERVER).ok();
 
     // Load persisted state from localStorage
-    let initial_model: Model = LocalStorage::get::<String>(STORAGE_MODEL)
+    let initial_model: Model = LocalStorage::get::<String>(storage::STORAGE_MODEL)
         .ok()
         .and_then(|s| Model::from_str(&s))
         .unwrap_or_default();
-    let initial_streaming: bool = LocalStorage::get(STORAGE_STREAMING).unwrap_or(true);
+    let initial_streaming: bool = LocalStorage::get(storage::STORAGE_STREAMING).unwrap_or(true);
 
     // Setup wizard state - show if no saved server
     let show_setup = RwSignal::new(saved_server.is_none());
@@ -46,6 +47,12 @@ pub fn App() -> impl IntoView {
     let audio_data = RwSignal::new(None::<Vec<u8>>);
     let error_message = RwSignal::new(None::<String>);
     let status_message = RwSignal::new(None::<String>);
+
+    // Audio history
+    let audio_history = RwSignal::new(storage::history::load());
+
+    // Text templates
+    let templates = RwSignal::new(storage::templates::load());
 
     // Voice lists
     let voices = RwSignal::new(Vec::<String>::new());
@@ -87,7 +94,7 @@ pub fn App() -> impl IntoView {
                 Ok(response) => {
                     // Success - we're connected
                     server_url.set(saved_url.clone());
-                    let _ = LocalStorage::set(STORAGE_SERVER_URL, &saved_url);
+                    let _ = LocalStorage::set(storage::STORAGE_SERVER_URL, &saved_url);
 
                     // Auto-select first voice
                     let current_model = model.get_untracked();
@@ -117,8 +124,8 @@ pub fn App() -> impl IntoView {
     // Callback when server setup completes successfully
     let on_server_connected = Callback::new(move |url: String| {
         // Save as last server for next launch
-        let _ = LocalStorage::set(STORAGE_LAST_SERVER, &url);
-        let _ = LocalStorage::set(STORAGE_SERVER_URL, &url);
+        let _ = LocalStorage::set(storage::STORAGE_LAST_SERVER, &url);
+        let _ = LocalStorage::set(storage::STORAGE_SERVER_URL, &url);
         server_url.set(url.clone());
 
         // Fetch voices and close setup
@@ -128,12 +135,12 @@ pub fn App() -> impl IntoView {
 
     // Callbacks
     let on_server_change = Callback::new(move |url: String| {
-        let _ = LocalStorage::set(STORAGE_SERVER_URL, &url);
+        let _ = LocalStorage::set(storage::STORAGE_SERVER_URL, &url);
         fetch_voices_action(url);
     });
 
     let on_model_change = Callback::new(move |m: Model| {
-        let _ = LocalStorage::set(STORAGE_MODEL, m.as_str());
+        let _ = LocalStorage::set(storage::STORAGE_MODEL, m.as_str());
         // Auto-select first voice/sample for the new model
         let first_voice = if m.uses_voices() {
             voices.get_untracked().first().cloned()
@@ -144,7 +151,7 @@ pub fn App() -> impl IntoView {
     });
 
     let on_streaming_change = Callback::new(move |streaming: bool| {
-        let _ = LocalStorage::set(STORAGE_STREAMING, streaming);
+        let _ = LocalStorage::set(storage::STORAGE_STREAMING, streaming);
     });
 
     let on_synthesize = Callback::new(move |_: ()| {
@@ -203,7 +210,22 @@ pub fn App() -> impl IntoView {
                         if let Some(err) = state.error {
                             error_message.set(Some(err));
                         } else if let Some(wav) = state.to_wav_bytes() {
-                            audio_data.set(Some(wav));
+                            audio_data.set(Some(wav.clone()));
+
+                            // Save to history
+                            let entry = HistoryEntry {
+                                id: storage::generate_id(),
+                                created_at: storage::now_millis(),
+                                text: txt.clone(),
+                                voice: voice.clone(),
+                                model: m.as_str().to_string(),
+                                audio_b64: base64::engine::general_purpose::STANDARD.encode(&wav),
+                                server_url: url.clone(),
+                            };
+                            audio_history.update(|h| {
+                                storage::history::add(h, entry);
+                                storage::history::save(h);
+                            });
                         } else {
                             error_message.set(Some("No audio data received".to_string()));
                         }
@@ -222,7 +244,22 @@ pub fn App() -> impl IntoView {
                             &response.audio_base64,
                         ) {
                             Ok(wav_bytes) => {
-                                audio_data.set(Some(wav_bytes));
+                                audio_data.set(Some(wav_bytes.clone()));
+
+                                // Save to history
+                                let entry = HistoryEntry {
+                                    id: storage::generate_id(),
+                                    created_at: storage::now_millis(),
+                                    text: txt.clone(),
+                                    voice: voice.clone(),
+                                    model: m.as_str().to_string(),
+                                    audio_b64: base64::engine::general_purpose::STANDARD.encode(&wav_bytes),
+                                    server_url: url.clone(),
+                                };
+                                audio_history.update(|h| {
+                                    storage::history::add(h, entry);
+                                    storage::history::save(h);
+                                });
                             }
                             Err(e) => {
                                 error_message.set(Some(format!("Failed to decode audio: {}", e)));
@@ -273,6 +310,31 @@ pub fn App() -> impl IntoView {
                     </div>
 
                     <div class="panel input-panel">
+                        <TextTemplates
+                            templates=templates.into()
+                            current_text=text.into()
+                            on_select=Callback::new(move |t: TextTemplate| {
+                                text.set(t.text);
+                            })
+                            on_save=Callback::new(move |name: String| {
+                                let t = TextTemplate {
+                                    id: storage::generate_id(),
+                                    name,
+                                    text: text.get_untracked(),
+                                    created_at: storage::now_millis(),
+                                };
+                                templates.update(|ts| {
+                                    ts.push(t);
+                                    storage::templates::save(ts);
+                                });
+                            })
+                            on_delete=Callback::new(move |id: String| {
+                                templates.update(|ts| {
+                                    ts.retain(|t| t.id != id);
+                                    storage::templates::save(ts);
+                                });
+                            })
+                        />
                         <TextInput text=text />
                         <SynthButton
                             is_loading=is_loading.into()
@@ -293,6 +355,27 @@ pub fn App() -> impl IntoView {
                     })}
 
                     <AudioPlayer audio_data=audio_data.into() />
+
+                    <AudioHistory
+                        history=audio_history.into()
+                        current_server_url=server_url.into()
+                        on_play=Callback::new(move |entry: HistoryEntry| {
+                            // Decode and play
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&entry.audio_b64) {
+                                audio_data.set(Some(bytes));
+                            }
+                        })
+                        on_delete=Callback::new(move |id: String| {
+                            audio_history.update(|h| {
+                                storage::history::remove(h, &id);
+                                storage::history::save(h);
+                            });
+                        })
+                        on_reuse=Callback::new(move |entry: HistoryEntry| {
+                            text.set(entry.text);
+                            selected_voice.set(entry.voice);
+                        })
+                    />
                 </main>
 
                 <footer style="background-color:black;">

@@ -1,4 +1,6 @@
+pub mod audio_history;
 pub mod audio_player;
+pub mod text_templates;
 pub mod model_selector;
 pub mod progress;
 pub mod server_config;
