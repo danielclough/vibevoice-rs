@@ -1,6 +1,7 @@
+use axum::http::HeaderValue;
 use clap::Parser;
 use std::sync::{Arc, mpsc as std_mpsc};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 use vibevoice::ModelVariant;
 
@@ -50,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create app state
     let default_model: ModelVariant = args.model.into();
+    let cors_origins = config.cors_origins.clone();
     let config = Arc::new(config);
     let has_web_dir = config.web_dir.is_some();
     let state = AppState {
@@ -61,13 +63,30 @@ async fn main() -> anyhow::Result<()> {
     // Build router
     let mut app = router(state);
 
-    // Add CORS if requested
-    if args.cors {
-        info!("CORS enabled for all origins");
-        let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any);
+    // Add CORS layer based on config
+    if !cors_origins.is_empty() {
+        let cors = if cors_origins.iter().any(|o| o == "*") {
+            info!("CORS enabled for all origins");
+            CorsLayer::permissive()
+        } else {
+            info!("CORS enabled for origins: {:?}", cors_origins);
+            let origins: Vec<HeaderValue> = cors_origins
+                .iter()
+                .filter_map(|o| o.parse().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::predicate(move |origin, _| {
+                    let origin_str = origin.to_str().unwrap_or("");
+                    let matched = origins.iter().any(|allowed| {
+                        let allowed_str = allowed.to_str().unwrap_or("");
+                        origin_str.starts_with(allowed_str)
+                    });
+                    info!("CORS check: origin={} matched={}", origin_str, matched);
+                    matched
+                }))
+                .allow_methods(Any)
+                .allow_headers(Any)
+        };
         app = app.layer(cors);
     }
 

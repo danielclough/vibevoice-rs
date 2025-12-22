@@ -48,6 +48,18 @@ pub struct Config {
     /// Directory containing the built vibevoice-web frontend to serve at /
     #[serde(default)]
     pub web_dir: Option<PathBuf>,
+
+    /// CORS allowed origins. Defaults to ["http://localhost", "http://127.0.0.1"].
+    /// Use ["*"] to allow all origins.
+    #[serde(default = "default_cors_origins")]
+    pub cors_origins: Vec<String>,
+}
+
+fn default_cors_origins() -> Vec<String> {
+    vec![
+        "http://localhost".to_string(),
+        "http://127.0.0.1".to_string(),
+    ]
 }
 
 impl Default for Config {
@@ -59,6 +71,7 @@ impl Default for Config {
             samples_dir: None,
             output_dir: None,
             web_dir: None,
+            cors_origins: default_cors_origins(),
         }
     }
 }
@@ -141,10 +154,6 @@ pub struct Args {
     /// Model variant to use
     #[arg(short, long, value_enum, default_value = "realtime")]
     pub model: ModelArg,
-
-    /// Enable CORS for all origins (enabled by default, use --no-cors to disable)
-    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
-    pub cors: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Deserialize)]

@@ -778,6 +778,7 @@ select {
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
     transition: background 0.2s;
+    cursor: pointer;
 }
 
 .template-item:hover {

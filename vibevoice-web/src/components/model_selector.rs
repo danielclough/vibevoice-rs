@@ -28,9 +28,9 @@ impl Model {
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            Model::Realtime => "Realtime (0.5B)",
-            Model::Batch1_5B => "Batch (1.5B)",
-            Model::Batch7B => "Batch (7B)",
+            Model::Realtime => "Single/Fast (0.5B)",
+            Model::Batch1_5B => "Multi/Script (1.5B)",
+            Model::Batch7B => "Multi/Script (7B)",
         }
     }
 

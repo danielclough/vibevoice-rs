@@ -100,12 +100,19 @@ pub fn TextTemplates(
                 <div class="templates-list">
                     {move || templates.get().into_iter().map(|t| {
                         let id_for_delete = t.id.clone();
+                        let template_for_select = t.clone();
                         view! {
-                            <div class="template-item">
+                            <div
+                                class="template-item"
+                                on:click=move |_| on_select.run(template_for_select.clone())
+                            >
                                 <span class="template-name">{t.name.clone()}</span>
                                 <button
                                     class="template-delete-btn"
-                                    on:click=move |_| on_delete.run(id_for_delete.clone())
+                                    on:click=move |ev| {
+                                        ev.stop_propagation();
+                                        on_delete.run(id_for_delete.clone());
+                                    }
                                     title="Delete template"
                                 >
                                     "Delete"
