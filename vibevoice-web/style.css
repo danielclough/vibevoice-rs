@@ -815,6 +815,65 @@ select {
     }
 }
 
+/* Voice Controls (select + preview button) */
+.voice-controls {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.voice-controls select {
+    flex: 1;
+}
+
+.preview-button {
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.875rem;
+    transition: background 0.2s, border-color 0.2s, transform 0.1s;
+    white-space: nowrap;
+}
+
+.preview-button:hover:not(:disabled) {
+    background: var(--border);
+    border-color: var(--accent);
+}
+
+.preview-button:active:not(:disabled) {
+    transform: scale(0.95);
+}
+
+.preview-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.preview-button.loading {
+    animation: pulse 1s infinite;
+}
+
+.preview-button.playing {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+}
+
 /* Responsive */
 @media (max-width: 600px) {
     .app {

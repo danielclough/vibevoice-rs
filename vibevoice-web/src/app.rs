@@ -306,6 +306,7 @@ pub fn App() -> impl IntoView {
                             voices=voices.into()
                             samples=samples.into()
                             selected_voice=selected_voice
+                            server_url=server_url.into()
                         />
                     </div>
 

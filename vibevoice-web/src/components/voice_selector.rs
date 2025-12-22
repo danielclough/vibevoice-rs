@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::components::model_selector::Model;
+use crate::components::voice_preview::VoicePreview;
 
 #[component]
 pub fn VoiceSelector(
@@ -9,6 +10,7 @@ pub fn VoiceSelector(
     voices: Signal<Vec<String>>,
     samples: Signal<Vec<String>>,
     selected_voice: RwSignal<String>,
+    server_url: Signal<String>,
 ) -> impl IntoView {
     let options = move || {
         let m = model.get();
@@ -34,25 +36,32 @@ pub fn VoiceSelector(
     };
 
     view! {
-        <div class="config-section">
+        <div class="config-section voice-section">
             <label for="voice-select">{label}</label>
-            <select
-                id="voice-select"
-                prop:value=move || selected_voice.get()
-                on:change=on_change
-            >
-                <option value="" disabled=true>"Select a voice..."</option>
-                {move || options().into_iter().map(|v| {
-                    let v_for_value = v.clone();
-                    let v_for_selected = v.clone();
-                    let v_for_text = v.clone();
-                    view! {
-                        <option value=v_for_value selected=move || selected_voice.get() == v_for_selected>
-                            {v_for_text}
-                        </option>
-                    }
-                }).collect::<Vec<_>>()}
-            </select>
+            <div class="voice-controls">
+                <select
+                    id="voice-select"
+                    prop:value=move || selected_voice.get()
+                    on:change=on_change
+                >
+                    <option value="" disabled=true>"Select a voice..."</option>
+                    {move || options().into_iter().map(|v| {
+                        let v_for_value = v.clone();
+                        let v_for_selected = v.clone();
+                        let v_for_text = v.clone();
+                        view! {
+                            <option value=v_for_value selected=move || selected_voice.get() == v_for_selected>
+                                {v_for_text}
+                            </option>
+                        }
+                    }).collect::<Vec<_>>()}
+                </select>
+                <VoicePreview
+                    server_url=server_url
+                    voice=selected_voice.into()
+                    model=model
+                />
+            </div>
         </div>
     }
 }

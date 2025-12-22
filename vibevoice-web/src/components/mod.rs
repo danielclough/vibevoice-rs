@@ -2,6 +2,7 @@ pub mod audio_history;
 pub mod audio_player;
 pub mod text_templates;
 pub mod model_selector;
+pub mod voice_preview;
 pub mod progress;
 pub mod server_config;
 pub mod server_setup;
