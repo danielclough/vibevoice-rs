@@ -1,6 +1,10 @@
 pub mod audio_history;
 pub mod audio_player;
+pub mod batch_processor;
+pub mod modal;
+pub mod sidebar;
 pub mod text_templates;
+pub mod toast;
 pub mod model_selector;
 pub mod voice_preview;
 pub mod progress;

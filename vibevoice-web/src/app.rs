@@ -9,14 +9,17 @@ use crate::storage;
 use crate::storage::history::HistoryEntry;
 use crate::storage::templates::TextTemplate;
 use crate::components::audio_history::AudioHistory;
-use crate::components::text_templates::TextTemplates;
 use crate::components::audio_player::AudioPlayer;
+use crate::components::batch_processor::BatchProcessor;
 use crate::components::model_selector::{Model, ModelSelector};
 use crate::components::progress::Progress;
 use crate::components::server_config::ServerConfig;
 use crate::components::server_setup::ServerSetup;
+use crate::components::sidebar::Sidebar;
 use crate::components::synth_button::SynthButton;
 use crate::components::text_input::TextInput;
+use crate::components::text_templates::TextTemplates;
+use crate::components::toast::{show_toast, ToastContainer, ToastMessage, ToastType};
 use crate::components::voice_selector::VoiceSelector;
 use crate::sse::stream::{start_streaming, SseEvent, StreamingState};
 
@@ -54,6 +57,11 @@ pub fn App() -> impl IntoView {
     // Text templates
     let templates = RwSignal::new(storage::templates::load());
 
+    // UI state
+    let sidebar_open = RwSignal::new(true);
+    let toasts = RwSignal::new(Vec::<ToastMessage>::new());
+    let batch_mode = RwSignal::new(false);
+
     // Voice lists
     let voices = RwSignal::new(Vec::<String>::new());
     let samples = RwSignal::new(Vec::<String>::new());
@@ -77,10 +85,9 @@ pub fn App() -> impl IntoView {
                     }
                     voices.set(response.voices);
                     samples.set(response.samples);
-                    error_message.set(None);
                 }
                 Err(e) => {
-                    error_message.set(Some(format!("Failed to fetch voices: {}", e)));
+                    show_toast(toasts, &format!("Failed to fetch voices: {}", e), ToastType::Error);
                 }
             }
         });
@@ -162,17 +169,16 @@ pub fn App() -> impl IntoView {
         let streaming = use_streaming.get_untracked();
 
         if txt.trim().is_empty() {
-            error_message.set(Some("Please enter some text to synthesize".to_string()));
+            show_toast(toasts, "Please enter some text to synthesize", ToastType::Error);
             return;
         }
 
         if voice.is_empty() {
-            error_message.set(Some("Please select a voice".to_string()));
+            show_toast(toasts, "Please select a voice", ToastType::Error);
             return;
         }
 
         is_loading.set(true);
-        error_message.set(None);
         audio_data.set(None);
         progress.set(None);
         status_message.set(Some(format!(
@@ -208,7 +214,7 @@ pub fn App() -> impl IntoView {
                 match result {
                     Ok(()) => {
                         if let Some(err) = state.error {
-                            error_message.set(Some(err));
+                            show_toast(toasts, &err, ToastType::Error);
                         } else if let Some(wav) = state.to_wav_bytes() {
                             audio_data.set(Some(wav.clone()));
 
@@ -227,11 +233,11 @@ pub fn App() -> impl IntoView {
                                 storage::history::save(h);
                             });
                         } else {
-                            error_message.set(Some("No audio data received".to_string()));
+                            show_toast(toasts, "No audio data received", ToastType::Error);
                         }
                     }
                     Err(e) => {
-                        error_message.set(Some(e));
+                        show_toast(toasts, &e, ToastType::Error);
                     }
                 }
             });
@@ -262,12 +268,12 @@ pub fn App() -> impl IntoView {
                                 });
                             }
                             Err(e) => {
-                                error_message.set(Some(format!("Failed to decode audio: {}", e)));
+                                show_toast(toasts, &format!("Failed to decode audio: {}", e), ToastType::Error);
                             }
                         }
                     }
                     Err(e) => {
-                        error_message.set(Some(e.message));
+                        show_toast(toasts, &e.message, ToastType::Error);
                     }
                 }
                 is_loading.set(false);
@@ -277,7 +283,7 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <div class="app">
+        <div class="app-container">
             // Show connecting state while auto-connecting to saved server
             <Show when=move || is_connecting.get()>
                 <div class="connecting-screen">
@@ -293,93 +299,129 @@ pub fn App() -> impl IntoView {
 
             // Show main app when connected
             <Show when=move || !show_setup.get() && !is_connecting.get()>
-                <header>
-                    <h1>"VibeVoice TTS"</h1>
+                <header class="app-header">
+                    <div class="logo-section">
+                        <h1 class="app-title">"VibeVoice"</h1>
+                    </div>
+                    <p class="tagline">"Text-to-Speech Synthesis"</p>
                 </header>
 
-                <main>
-                    <div class="panel config-panel">
-                        <ServerConfig server_url=server_url on_change=on_server_change />
-                        <ModelSelector model=model on_change=on_model_change />
-                        <VoiceSelector
-                            model=model.into()
-                            voices=voices.into()
-                            samples=samples.into()
-                            selected_voice=selected_voice
-                            server_url=server_url.into()
-                        />
-                    </div>
-
-                    <div class="panel input-panel">
-                        <TextTemplates
-                            templates=templates.into()
-                            current_text=text.into()
-                            on_select=Callback::new(move |t: TextTemplate| {
-                                text.set(t.text);
-                            })
-                            on_save=Callback::new(move |name: String| {
-                                let t = TextTemplate {
-                                    id: storage::generate_id(),
-                                    name,
-                                    text: text.get_untracked(),
-                                    created_at: storage::now_millis(),
-                                };
-                                templates.update(|ts| {
-                                    ts.push(t);
-                                    storage::templates::save(ts);
-                                });
+                <div class="main-layout">
+                    // Sidebar with history and batch mode toggle
+                    <Sidebar is_open=sidebar_open>
+                        <AudioHistory
+                            history=audio_history.into()
+                            current_server_url=server_url.into()
+                            on_play=Callback::new(move |entry: HistoryEntry| {
+                                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&entry.audio_b64) {
+                                    audio_data.set(Some(bytes));
+                                }
                             })
                             on_delete=Callback::new(move |id: String| {
-                                templates.update(|ts| {
-                                    ts.retain(|t| t.id != id);
-                                    storage::templates::save(ts);
+                                audio_history.update(|h| {
+                                    storage::history::remove(h, &id);
+                                    storage::history::save(h);
                                 });
                             })
+                            on_reuse=Callback::new(move |entry: HistoryEntry| {
+                                text.set(entry.text);
+                                selected_voice.set(entry.voice);
+                            })
                         />
-                        <TextInput text=text />
-                        <SynthButton
-                            is_loading=is_loading.into()
-                            use_streaming=use_streaming
-                            on_synthesize=on_synthesize
-                            on_streaming_change=on_streaming_change
-                        />
-                    </div>
 
-                    <Progress progress=progress.into() />
+                        <div class="sidebar-divider" />
 
-                    {move || status_message.get().map(|msg| view! {
-                        <div class="status-message">{msg}</div>
-                    })}
+                        <button
+                            class="mode-toggle-btn"
+                            on:click=move |_| batch_mode.update(|b| *b = !*b)
+                        >
+                            {move || if batch_mode.get() { "Single Mode" } else { "Batch Mode" }}
+                        </button>
+                    </Sidebar>
 
-                    {move || error_message.get().map(|msg| view! {
-                        <div class="error-message">{msg}</div>
-                    })}
+                    // Main content area
+                    <main class="main-content">
+                        <div class="panel config-panel">
+                            <ServerConfig server_url=server_url on_change=on_server_change />
+                            <ModelSelector model=model on_change=on_model_change />
+                            <VoiceSelector
+                                model=model.into()
+                                voices=voices.into()
+                                samples=samples.into()
+                                selected_voice=selected_voice
+                                server_url=server_url.into()
+                            />
+                        </div>
 
-                    <AudioPlayer audio_data=audio_data.into() />
+                        // Conditional: Batch mode or Single mode
+                        {move || if batch_mode.get() {
+                            view! {
+                                <div class="panel input-panel">
+                                    <BatchProcessor
+                                        server_url=server_url.into()
+                                        voice=selected_voice.into()
+                                        model=model.into()
+                                    />
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <div class="panel input-panel">
+                                    <TextTemplates
+                                        templates=templates.into()
+                                        current_text=text.into()
+                                        on_select=Callback::new(move |t: TextTemplate| {
+                                            text.set(t.text);
+                                        })
+                                        on_save=Callback::new(move |name: String| {
+                                            let t = TextTemplate {
+                                                id: storage::generate_id(),
+                                                name,
+                                                text: text.get_untracked(),
+                                                created_at: storage::now_millis(),
+                                            };
+                                            templates.update(|ts| {
+                                                ts.push(t);
+                                                storage::templates::save(ts);
+                                            });
+                                        })
+                                        on_delete=Callback::new(move |id: String| {
+                                            templates.update(|ts| {
+                                                ts.retain(|t| t.id != id);
+                                                storage::templates::save(ts);
+                                            });
+                                        })
+                                    />
+                                    <TextInput text=text />
+                                    <SynthButton
+                                        is_loading=is_loading.into()
+                                        use_streaming=use_streaming
+                                        on_synthesize=on_synthesize
+                                        on_streaming_change=on_streaming_change
+                                    />
+                                </div>
 
-                    <AudioHistory
-                        history=audio_history.into()
-                        current_server_url=server_url.into()
-                        on_play=Callback::new(move |entry: HistoryEntry| {
-                            // Decode and play
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&entry.audio_b64) {
-                                audio_data.set(Some(bytes));
-                            }
-                        })
-                        on_delete=Callback::new(move |id: String| {
-                            audio_history.update(|h| {
-                                storage::history::remove(h, &id);
-                                storage::history::save(h);
-                            });
-                        })
-                        on_reuse=Callback::new(move |entry: HistoryEntry| {
-                            text.set(entry.text);
-                            selected_voice.set(entry.voice);
-                        })
-                    />
-                </main>
+                                <Progress progress=progress.into() />
 
-                <footer style="background-color:black;">
+                                {move || status_message.get().map(|msg| view! {
+                                    <div class="status-message">{msg}</div>
+                                })}
+
+                                <AudioPlayer audio_data=audio_data.into() />
+                            }.into_any()
+                        }}
+                    </main>
+                </div>
+
+                // Toast notifications
+                <ToastContainer
+                    toasts=toasts.into()
+                    on_dismiss=Callback::new(move |id: usize| {
+                        toasts.update(|t| t.retain(|m| m.id != id));
+                    })
+                />
+
+                <footer class="app-footer">
                     <p>"VibeVoice-RS © Daniel Clough "<a href="https://github.com/danielclough/vibevoice-rs/blob/main/LICENSE">"MIT LICENSE"</a></p>
                 </footer>
             </Show>
