@@ -107,6 +107,7 @@ impl DesktopConfig {
             samples_dir: self.samples_dir.clone(),
             output_dir: self.output_dir.clone(),
             web_dir: None, // Tauri serves the frontend
+            cors_origins: vec![], // Not needed for embedded server
         }
     }
 }
