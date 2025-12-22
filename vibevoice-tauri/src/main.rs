@@ -60,6 +60,65 @@ fn get_config(state: tauri::State<AppState>) -> DesktopConfig {
     state.config.clone()
 }
 
+/// Tauri command: Start the embedded server.
+/// Returns the server URL on success, or an error message.
+#[tauri::command]
+fn start_embedded_server(state: tauri::State<AppState>) -> Result<String, String> {
+    let mut guard = state.server.lock().map_err(|e| e.to_string())?;
+
+    // Check if already running
+    if guard.is_some() {
+        return Ok(guard.as_ref().unwrap().url());
+    }
+
+    // Start the embedded server
+    let model_variant = parse_model_variant(&state.config.default_model);
+    info!("Starting embedded server with model {:?}...", model_variant);
+
+    let server_config = state.config.to_server_config();
+    match EmbeddedServer::start(server_config, model_variant) {
+        Ok(server) => {
+            let url = server.url();
+            info!("Embedded server started at {}", url);
+            *guard = Some(server);
+            Ok(url)
+        }
+        Err(e) => {
+            error!("Failed to start embedded server: {}", e);
+            Err(format!("Failed to start server: {}", e))
+        }
+    }
+}
+
+/// Tauri command: Stop the embedded server.
+#[tauri::command]
+fn stop_embedded_server(state: tauri::State<AppState>) -> Result<(), String> {
+    let mut guard = state.server.lock().map_err(|e| e.to_string())?;
+
+    if let Some(mut server) = guard.take() {
+        server.shutdown();
+        info!("Embedded server stopped");
+    }
+
+    Ok(())
+}
+
+/// Tauri command: Get the embedded server status.
+/// Returns "running", "stopped", or "failed".
+#[tauri::command]
+fn get_embedded_server_status(state: tauri::State<AppState>) -> String {
+    match state.server.lock() {
+        Ok(guard) => {
+            if guard.is_some() {
+                "running".to_string()
+            } else {
+                "stopped".to_string()
+            }
+        }
+        Err(_) => "failed".to_string(),
+    }
+}
+
 fn main() {
     // Initialize logging
     let subscriber = FmtSubscriber::builder()
@@ -82,30 +141,10 @@ fn main() {
         }
     };
 
-    // Start embedded server if enabled
-    let embedded_server = if config.embedded_server {
-        let model_variant = parse_model_variant(&config.default_model);
-        info!("Using model variant: {:?}", model_variant);
-
-        let server_config = config.to_server_config();
-        match EmbeddedServer::start(server_config, model_variant) {
-            Ok(server) => {
-                info!("Embedded server started at {}", server.url());
-                Some(server)
-            }
-            Err(e) => {
-                error!("Failed to start embedded server: {}", e);
-                None
-            }
-        }
-    } else {
-        let remote_url = config
-            .remote_server_url
-            .as_deref()
-            .unwrap_or("http://localhost:3908");
-        info!("Using remote server: {}", remote_url);
-        None
-    };
+    // Server is started on-demand via start_embedded_server command
+    // No auto-start - user chooses via setup wizard
+    let embedded_server: Option<EmbeddedServer> = None;
+    info!("Embedded server will start on-demand via setup wizard");
 
     // Store hotkey config for setup
     let hotkey_config = config.hotkey_show.clone();
@@ -144,7 +183,13 @@ fn main() {
             info!("Tauri application setup complete");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_server_url, get_config,])
+        .invoke_handler(tauri::generate_handler![
+            get_server_url,
+            get_config,
+            start_embedded_server,
+            stop_embedded_server,
+            get_embedded_server_status,
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {

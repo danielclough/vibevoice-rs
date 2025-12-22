@@ -31,3 +31,39 @@ pub async fn get_server_url() -> Option<String> {
         Err(_) => None,
     }
 }
+
+/// Start the embedded server (Tauri only).
+/// Returns the server URL if successful, None otherwise.
+pub async fn start_embedded_server() -> Option<String> {
+    if !is_tauri() {
+        return None;
+    }
+
+    match tauri_invoke("start_embedded_server").await {
+        Ok(value) => value.as_string(),
+        Err(_) => None,
+    }
+}
+
+/// Stop the embedded server (Tauri only).
+/// Returns true if successful.
+pub async fn stop_embedded_server() -> bool {
+    if !is_tauri() {
+        return false;
+    }
+
+    tauri_invoke("stop_embedded_server").await.is_ok()
+}
+
+/// Get the embedded server status (Tauri only).
+/// Returns "running", "stopped", or "failed".
+pub async fn get_embedded_server_status() -> Option<String> {
+    if !is_tauri() {
+        return None;
+    }
+
+    match tauri_invoke("get_embedded_server_status").await {
+        Ok(value) => value.as_string(),
+        Err(_) => None,
+    }
+}

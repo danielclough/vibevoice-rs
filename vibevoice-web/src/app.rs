@@ -8,28 +8,35 @@ use crate::components::audio_player::AudioPlayer;
 use crate::components::model_selector::{Model, ModelSelector};
 use crate::components::progress::Progress;
 use crate::components::server_config::ServerConfig;
+use crate::components::server_setup::ServerSetup;
 use crate::components::synth_button::SynthButton;
 use crate::components::text_input::TextInput;
 use crate::components::voice_selector::VoiceSelector;
 use crate::sse::stream::{start_streaming, SseEvent, StreamingState};
 
 const STORAGE_SERVER_URL: &str = "vibevoice.server_url";
+const STORAGE_LAST_SERVER: &str = "vibevoice.last_server";
 const STORAGE_MODEL: &str = "vibevoice.model";
 const STORAGE_STREAMING: &str = "vibevoice.use_streaming";
-const DEFAULT_SERVER_URL: &str = "http://localhost:3908";
 
 #[component]
 pub fn App() -> impl IntoView {
+    // Check if we have a saved server from previous session
+    let saved_server: Option<String> = LocalStorage::get(STORAGE_LAST_SERVER).ok();
+
     // Load persisted state from localStorage
-    let initial_server_url: String = LocalStorage::get(STORAGE_SERVER_URL).unwrap_or_else(|_| DEFAULT_SERVER_URL.to_string());
     let initial_model: Model = LocalStorage::get::<String>(STORAGE_MODEL)
         .ok()
         .and_then(|s| Model::from_str(&s))
         .unwrap_or_default();
     let initial_streaming: bool = LocalStorage::get(STORAGE_STREAMING).unwrap_or(true);
 
+    // Setup wizard state - show if no saved server
+    let show_setup = RwSignal::new(saved_server.is_none());
+    let is_connecting = RwSignal::new(saved_server.is_some()); // Show connecting state if we have a saved server
+
     // State signals
-    let server_url = RwSignal::new(initial_server_url);
+    let server_url = RwSignal::new(saved_server.clone().unwrap_or_default());
     let model = RwSignal::new(initial_model);
     let text = RwSignal::new(String::new());
     let selected_voice = RwSignal::new(String::new());
@@ -44,7 +51,7 @@ pub fn App() -> impl IntoView {
     let voices = RwSignal::new(Vec::<String>::new());
     let samples = RwSignal::new(Vec::<String>::new());
 
-    // Fetch voices on mount and when server URL changes
+    // Fetch voices helper
     let fetch_voices_action = move |url: String| {
         spawn_local(async move {
             match fetch_voices(&url).await {
@@ -72,18 +79,51 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // On mount: fetch server URL from Tauri if available, then fetch voices
-    spawn_local(async move {
-        // Try to get server URL from Tauri config
-        if let Some(tauri_url) = tauri::get_server_url().await {
-            server_url.set(tauri_url.clone());
-            let _ = LocalStorage::set(STORAGE_SERVER_URL, &tauri_url);
-            fetch_voices_action(tauri_url);
-        } else {
-            // Fall back to current value (from LocalStorage or default)
-            let url = server_url.get_untracked();
-            fetch_voices_action(url);
-        }
+    // On mount: try to auto-connect to saved server
+    if let Some(saved_url) = saved_server {
+        spawn_local(async move {
+            // Try to connect to the saved server
+            match fetch_voices(&saved_url).await {
+                Ok(response) => {
+                    // Success - we're connected
+                    server_url.set(saved_url.clone());
+                    let _ = LocalStorage::set(STORAGE_SERVER_URL, &saved_url);
+
+                    // Auto-select first voice
+                    let current_model = model.get_untracked();
+                    let first_voice = if current_model.uses_voices() {
+                        response.voices.first().cloned()
+                    } else {
+                        response.samples.first().cloned()
+                    };
+                    if let Some(v) = first_voice {
+                        selected_voice.set(v);
+                    }
+                    voices.set(response.voices);
+                    samples.set(response.samples);
+
+                    is_connecting.set(false);
+                    show_setup.set(false);
+                }
+                Err(_) => {
+                    // Failed to connect - show setup wizard
+                    is_connecting.set(false);
+                    show_setup.set(true);
+                }
+            }
+        });
+    }
+
+    // Callback when server setup completes successfully
+    let on_server_connected = Callback::new(move |url: String| {
+        // Save as last server for next launch
+        let _ = LocalStorage::set(STORAGE_LAST_SERVER, &url);
+        let _ = LocalStorage::set(STORAGE_SERVER_URL, &url);
+        server_url.set(url.clone());
+
+        // Fetch voices and close setup
+        fetch_voices_action(url);
+        show_setup.set(false);
     });
 
     // Callbacks
@@ -201,48 +241,64 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            <header>
-                <h1>"VibeVoice TTS"</h1>
-            </header>
-
-            <main>
-                <div class="panel config-panel">
-                    <ServerConfig server_url=server_url on_change=on_server_change />
-                    <ModelSelector model=model on_change=on_model_change />
-                    <VoiceSelector
-                        model=model.into()
-                        voices=voices.into()
-                        samples=samples.into()
-                        selected_voice=selected_voice
-                    />
+            // Show connecting state while auto-connecting to saved server
+            <Show when=move || is_connecting.get()>
+                <div class="connecting-screen">
+                    <h1>"VibeVoice"</h1>
+                    <p>"Connecting to server..."</p>
                 </div>
+            </Show>
 
-                <div class="panel input-panel">
-                    <TextInput text=text />
-                    <SynthButton
-                        is_loading=is_loading.into()
-                        use_streaming=use_streaming
-                        on_synthesize=on_synthesize
-                        on_streaming_change=on_streaming_change
-                    />
-                </div>
+            // Show setup wizard if no server connected
+            <Show when=move || show_setup.get() && !is_connecting.get()>
+                <ServerSetup on_connected=on_server_connected />
+            </Show>
 
-                <Progress progress=progress.into() />
+            // Show main app when connected
+            <Show when=move || !show_setup.get() && !is_connecting.get()>
+                <header>
+                    <h1>"VibeVoice TTS"</h1>
+                </header>
 
-                {move || status_message.get().map(|msg| view! {
-                    <div class="status-message">{msg}</div>
-                })}
+                <main>
+                    <div class="panel config-panel">
+                        <ServerConfig server_url=server_url on_change=on_server_change />
+                        <ModelSelector model=model on_change=on_model_change />
+                        <VoiceSelector
+                            model=model.into()
+                            voices=voices.into()
+                            samples=samples.into()
+                            selected_voice=selected_voice
+                        />
+                    </div>
 
-                {move || error_message.get().map(|msg| view! {
-                    <div class="error-message">{msg}</div>
-                })}
+                    <div class="panel input-panel">
+                        <TextInput text=text />
+                        <SynthButton
+                            is_loading=is_loading.into()
+                            use_streaming=use_streaming
+                            on_synthesize=on_synthesize
+                            on_streaming_change=on_streaming_change
+                        />
+                    </div>
 
-                <AudioPlayer audio_data=audio_data.into() />
-            </main>
+                    <Progress progress=progress.into() />
 
-            <footer style="background-color:black;">
-                <p>"VibeVoice-RS © Daniel Clough "<a href="https://github.com/danielclough/vibevoice-rs/blob/main/LICENSE">"MIT LICENSE"</a></p>
-            </footer>
+                    {move || status_message.get().map(|msg| view! {
+                        <div class="status-message">{msg}</div>
+                    })}
+
+                    {move || error_message.get().map(|msg| view! {
+                        <div class="error-message">{msg}</div>
+                    })}
+
+                    <AudioPlayer audio_data=audio_data.into() />
+                </main>
+
+                <footer style="background-color:black;">
+                    <p>"VibeVoice-RS © Daniel Clough "<a href="https://github.com/danielclough/vibevoice-rs/blob/main/LICENSE">"MIT LICENSE"</a></p>
+                </footer>
+            </Show>
         </div>
     }
 }
