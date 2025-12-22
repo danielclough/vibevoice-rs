@@ -37,3 +37,4 @@ gpu = ["vibevoice/gpu"]
 # Platform-specific convenience features
 macos = ["metal", "accelerate"]
 linux-gpu = ["gpu"]
+windows-gpu = ["gpu"]
