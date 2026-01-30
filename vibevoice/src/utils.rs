@@ -5,7 +5,7 @@ use candle_nn::VarBuilder;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use serde_json;
+
 use std::fs::File;
 use std::path::PathBuf;
 use std::{fs, path::Path};

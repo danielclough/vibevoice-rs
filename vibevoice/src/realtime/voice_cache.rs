@@ -74,7 +74,8 @@ impl CacheEntry {
                 return Err(anyhow!(
                     "seq_len mismatch: last_hidden_state has {} but KV cache has {}. \
                     This would cause RoPE position errors!",
-                    hidden_seq_len, kv_seq_len
+                    hidden_seq_len,
+                    kv_seq_len
                 ));
             }
         }
@@ -180,7 +181,11 @@ impl SafetensorCache {
     }
 
     /// Load a single cache entry from the tensor map.
-    fn load_cache_entry(tensors: &HashMap<String, Tensor>, prefix: &str, _device: &Device) -> Result<CacheEntry> {
+    fn load_cache_entry(
+        tensors: &HashMap<String, Tensor>,
+        prefix: &str,
+        _device: &Device,
+    ) -> Result<CacheEntry> {
         use candle_core::DType;
 
         // Use F32 for all devices to avoid dtype mismatch issues
@@ -234,6 +239,7 @@ impl SafetensorCache {
     /// Get the positive path caches as Qwen2-compatible format.
     ///
     /// Returns `(lm_cache, tts_lm_cache)` for `SplitLLM::restore_kv_cache()`.
+    #[allow(clippy::type_complexity)]
     pub fn positive_caches(
         &self,
     ) -> (Vec<Option<(Tensor, Tensor)>>, Vec<Option<(Tensor, Tensor)>>) {
@@ -243,6 +249,7 @@ impl SafetensorCache {
     /// Get the negative path caches as Qwen2-compatible format.
     ///
     /// Returns `(neg_lm_cache, neg_tts_lm_cache)` for the negative CFG path.
+    #[allow(clippy::type_complexity)]
     pub fn negative_caches(
         &self,
     ) -> (Vec<Option<(Tensor, Tensor)>>, Vec<Option<(Tensor, Tensor)>>) {

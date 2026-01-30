@@ -20,6 +20,7 @@ pub const TTS_TEXT_WINDOW_SIZE: usize = 5;
 pub const TTS_SPEECH_WINDOW_SIZE: usize = 6;
 
 /// Audio sample rate for VibeVoice models (24kHz).
+#[allow(dead_code)]
 pub const AUDIO_SAMPLE_RATE: u32 = 24000;
 
 /// Default number of upper layers for TTS (tts_language_model).
@@ -223,27 +224,27 @@ mod tests {
                 tie_word_embeddings: false,
             },
             diffusion_head_config: DiffusionHeadConfig {
-                ddpm_batch_mul: 1,
-                ddpm_beta_schedule: "scaled_linear".to_string(),
+                _ddpm_batch_mul: 1,
+                _ddpm_beta_schedule: "scaled_linear".to_string(),
                 ddpm_num_inference_steps: 5,
                 ddpm_num_steps: 1000,
-                ddpm_prediction_type: Some("v_prediction".to_string()),
+                _ddpm_prediction_type: Some("v_prediction".to_string()),
                 head_ffn_ratio: 4.0,
                 head_layers: 6,
                 hidden_size: 768,
                 latent_size: 64,
-                model_type: "DiffusionHead".to_string(),
-                prediction_type: "v_prediction".to_string(),
+                _model_type: "DiffusionHead".to_string(),
+                _prediction_type: "v_prediction".to_string(),
                 rms_norm_eps: 1e-6,
                 speech_vae_dim: 64,
             },
             acoustic_tokenizer_config: AcousticTokenizerConfig {
                 channels: 1,
-                corpus_normalize: 0.01,
+                _corpus_normalize: 0.01,
                 causal: true,
                 vae_dim: 64,
                 fix_std: 1.0,
-                std_dist_type: "constant".to_string(),
+                _std_dist_type: "constant".to_string(),
                 mixer_layer: "depthwise_conv".to_string(),
                 conv_norm: "none".to_string(),
                 pad_mode: "constant".to_string(),
@@ -253,7 +254,7 @@ mod tests {
                 layernorm_elementwise_affine: true,
                 conv_bias: true,
                 layer_scale_init_value: 1e-6,
-                weight_init_value: 1.0,
+                _weight_init_value: 1.0,
                 encoder_n_filters: 32,
                 encoder_ratios: vec![8, 5, 5, 4, 2, 2],
                 encoder_depths: "3-3-3-3-3-3-8".to_string(),

@@ -215,7 +215,10 @@ impl DiffusionHead {
             let w_rms = w_flat.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
             info!(
                 "[WEIGHTS] noisy_images_proj: shape={:?}, first5={:?}, mean={:.8}, rms={:.6}",
-                w.dims(), first5, w_mean, w_rms
+                w.dims(),
+                first5,
+                w_mean,
+                w_rms
             );
         }
 
@@ -267,7 +270,11 @@ impl DiffusionHead {
             let x_rms = x.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
             let t_freq_rms = t_freq.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
             let t_emb_rms = t_emb.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-            let cond_proj_rms = condition_proj.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let cond_proj_rms = condition_proj
+                .sqr()?
+                .mean_all()?
+                .sqrt()?
+                .to_scalar::<f32>()?;
             let c_rms = c.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
             info!(
                 "[DIFF HEAD] x_rms={:.6}, t_freq_rms={:.6}, t_emb_rms={:.6}, cond_proj_rms={:.6}, c_rms={:.6}",

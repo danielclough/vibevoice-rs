@@ -1,5 +1,5 @@
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candle_core::Tensor;
 use std::collections::HashMap;
 
 /// Cache for streaming convolution, similar to KV cache in attention
@@ -9,7 +9,6 @@ pub struct StreamingCache {
     /// Map from layer_id to cached tensor
     /// Format: layer_id → cached_state [batch, channels, time]
     cache: HashMap<String, Tensor>,
-    device: Device,
     /// Number of tokens processed (for debug logging)
     tokens_processed: usize,
     /// Number of warmup tokens (used for debug logging only)
@@ -18,10 +17,9 @@ pub struct StreamingCache {
 }
 
 impl StreamingCache {
-    pub fn new(device: Device) -> Self {
+    pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
-            device,
             tokens_processed: 0,
             warmup_tokens: 6, // Used for debug logging only
         }

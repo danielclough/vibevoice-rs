@@ -98,7 +98,7 @@ impl AudioData {
         // fmt chunk
         header.extend_from_slice(b"fmt ");
         header.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-        header.extend_from_slice(&1u16.to_le_bytes());  // PCM format
+        header.extend_from_slice(&1u16.to_le_bytes()); // PCM format
         header.extend_from_slice(&num_channels.to_le_bytes());
         header.extend_from_slice(&sample_rate.to_le_bytes());
         header.extend_from_slice(&byte_rate.to_le_bytes());

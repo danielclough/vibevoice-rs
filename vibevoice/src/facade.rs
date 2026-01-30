@@ -1,10 +1,16 @@
 //! High-level VibeVoice API for text-to-speech synthesis.
 
 use crate::{
-    AudioData, Result, VibeVoiceError, model::VibeVoiceModel, processor::VibeVoiceProcessor, pytorch_rng::set_all_seeds, realtime::{model::VibeVoiceRealtimeModel, voice_cache::SafetensorCache}, utils::{
-        create_remapped_varbuilder, download_model_files, download_realtime_model_files,
-        get_device, resolve_voice_path, detect_voice_type, VoiceType,
-    }, voice_mapper::{VoiceMapper, parse_txt_script}
+    AudioData, Result, VibeVoiceError,
+    model::VibeVoiceModel,
+    processor::VibeVoiceProcessor,
+    pytorch_rng::set_all_seeds,
+    realtime::{model::VibeVoiceRealtimeModel, voice_cache::SafetensorCache},
+    utils::{
+        VoiceType, create_remapped_varbuilder, detect_voice_type, download_model_files,
+        download_realtime_model_files, get_device, resolve_voice_path,
+    },
+    voice_mapper::{VoiceMapper, parse_txt_script},
 };
 use candle_core::{Device as CandleDevice, Tensor};
 use std::path::{Path, PathBuf};
@@ -80,6 +86,7 @@ pub struct VibeVoice {
     cfg_scale: f32,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ModelInner {
     Batch(VibeVoiceModel),
     Realtime(VibeVoiceRealtimeModel),
@@ -114,7 +121,7 @@ impl VibeVoice {
     ///
     /// * `text` - Text to synthesize
     /// * `voice_path` - Optional path to voice sample for cloning (batch models)
-    ///                  or voice cache file (realtime model)
+    ///   or voice cache file (realtime model)
     ///
     /// # Example
     ///
@@ -147,22 +154,26 @@ impl VibeVoice {
             .map_err(|e| VibeVoiceError::InitializationError(e.to_string()))?;
 
         // Validate voice file type matches model
-        if let Some(voice) = voice_path {
-            if let Some(detected_type) = detect_voice_type(voice) {
+        if let Some(voice) = voice_path
+            && let Some(detected_type) = detect_voice_type(voice)
+        {
                 match (self.variant, detected_type) {
                     (ModelVariant::Realtime, VoiceType::WavSample) => {
                         return Err(VibeVoiceError::VoiceError(
-                            "Realtime model requires .safetensors voice cache, not .wav".to_string(),
+                            "Realtime model requires .safetensors voice cache, not .wav"
+                                .to_string(),
                         ));
                     }
-                    (ModelVariant::Batch1_5B | ModelVariant::Batch7B, VoiceType::SafetensorCache) => {
+                    (
+                        ModelVariant::Batch1_5B | ModelVariant::Batch7B,
+                        VoiceType::SafetensorCache,
+                    ) => {
                         return Err(VibeVoiceError::VoiceError(
                             "Batch models require .wav voice samples, not .safetensors".to_string(),
                         ));
                     }
                     _ => {}
                 }
-            }
         }
 
         match self.variant {

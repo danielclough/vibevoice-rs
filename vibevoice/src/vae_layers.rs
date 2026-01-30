@@ -173,7 +173,6 @@ pub struct SConv1d {
     pub causal: bool,
     pub pad_mode: String,
     pub kernel_size: usize,
-    pub dilation: usize,
     pub stride: usize,
     pub padding_total: usize,
     pub context_size: usize, // Number of samples to keep as context for streaming
@@ -229,7 +228,6 @@ impl SConv1d {
             causal,
             pad_mode: pad_mode.to_string(),
             kernel_size,
-            dilation,
             stride,
             padding_total,
             context_size,
@@ -581,6 +579,7 @@ impl SConvTranspose1d {
 
 /// FFN - Feed Forward Network
 /// Python: class FFN(nn.Module) in modular_vibevoice_tokenizer.py:579
+#[allow(clippy::upper_case_acronyms)]
 pub struct FFN {
     pub linear1: Linear,
     pub linear2: Linear,

@@ -35,6 +35,7 @@
 use crate::acoustic_connector::AcousticConnector;
 use crate::config::VAEDecoderConfig;
 use crate::diffusion::{DPMSolverPP, DiffusionHead};
+use crate::pytorch_rng::seeded_randn;
 use crate::realtime::binary_classifier::BinaryClassifier;
 use crate::realtime::config::{RealtimeConfig, TTS_SPEECH_WINDOW_SIZE};
 use crate::realtime::generation::{GenerationConfig, WindowedGenerator};
@@ -42,7 +43,6 @@ use crate::realtime::split_llm::DualSplitLLM;
 use crate::realtime::voice_cache::SafetensorCache;
 use crate::streaming_cache::StreamingCache;
 use crate::utils::{create_realtime_remapped_varbuilder, tensor_stats};
-use crate::pytorch_rng::seeded_randn;
 use crate::vae_decoder::VAEDecoder;
 
 use anyhow::{Result, anyhow};
@@ -292,10 +292,10 @@ impl VibeVoiceRealtimeModel {
 
         // Create generator with optimal realtime settings
         let gen_config = GenerationConfig {
-            cfg_scale: REALTIME_CFG_SCALE,
-            num_diffusion_steps: self.solver.num_steps,
-            speech_scaling_factor: self.speech_scaling_factor,
-            speech_bias_factor: self.speech_bias_factor,
+            _cfg_scale: REALTIME_CFG_SCALE,
+            _num_diffusion_steps: self.solver.num_steps,
+            _speech_scaling_factor: self.speech_scaling_factor,
+            _speech_bias_factor: self.speech_bias_factor,
         };
 
         let mut generator = WindowedGenerator::new(gen_config, &self.config, self.device.clone())?;
@@ -308,7 +308,7 @@ impl VibeVoiceRealtimeModel {
         )?;
         let num_windows = windows.len();
         let mut audio_chunks = Vec::new();
-        let mut acoustic_cache = StreamingCache::new(self.device.clone());
+        let mut acoustic_cache = StreamingCache::new();
 
         // Maximum generation length (matches Python's max_position_embeddings check)
         let max_speech_tokens = self.config.llm_config.max_position_embeddings;
@@ -434,9 +434,14 @@ impl VibeVoiceRealtimeModel {
 
                 // Check EOS with probability logging (debug level only)
                 if tracing::enabled!(tracing::Level::DEBUG) {
-                    let eos_prob = self.eos_classifier.get_probability(&generator.get_positive_condition()?)?;
-                    if total_speech_tokens < 10 || total_speech_tokens % 50 == 0 {
-                        debug!("EOS probability at token {}: {:.4}", total_speech_tokens, eos_prob);
+                    let eos_prob = self
+                        .eos_classifier
+                        .get_probability(&generator.get_positive_condition()?)?;
+                    if total_speech_tokens < 10 || total_speech_tokens.is_multiple_of(50) {
+                        debug!(
+                            "EOS probability at token {}: {:.4}",
+                            total_speech_tokens, eos_prob
+                        );
                     }
                 }
                 if generator.check_eos(&self.eos_classifier)? {

@@ -15,6 +15,7 @@ pub struct VAEStage {
 }
 
 impl VAEStage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vb: VarBuilder,
         #[allow(unused_variables)] stage_idx: usize,

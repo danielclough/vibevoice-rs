@@ -11,9 +11,9 @@ use crate::{
     acoustic_connector::AcousticConnector,
     config::{VAEDecoderConfig, VibeVoiceConfig},
     diffusion::{DPMSolverPP, DiffusionHead},
+    pytorch_rng::{restore_rng_state, save_rng_state, seeded_randn},
     semantic_tokenizer::SemanticTokenizer,
     speech_connector::SpeechConnector,
-    pytorch_rng::{restore_rng_state, save_rng_state, seeded_randn},
     vae_decoder::VAEDecoder,
     vae_encoder::VAEEncoder,
 };
@@ -37,8 +37,9 @@ fn save_debug_tensor(name: &str, tensor: &Tensor) {
     let filename = debug_dir.join(format!("{:04}_{}.npz", counter, name));
 
     // Convert tensor to ndarray and save
-    if let Ok(flat) = tensor.flatten_all() {
-        if let Ok(data) = flat.to_vec1::<f32>() {
+    if let Ok(flat) = tensor.flatten_all()
+        && let Ok(data) = flat.to_vec1::<f32>()
+    {
             use ndarray::Array1;
             let arr = Array1::from_vec(data);
             if let Ok(mut writer) = crate::test_helpers::CheckpointWriter::create(&filename) {
@@ -49,7 +50,6 @@ fn save_debug_tensor(name: &str, tensor: &Tensor) {
                 let _ = writer.finish();
                 info!("📁 Saved debug checkpoint: {}", filename.display());
             }
-        }
     }
 }
 
@@ -66,7 +66,6 @@ pub struct VibeVoiceModel {
     pub semantic_tokenizer: SemanticTokenizer,
     vae_encoder: VAEEncoder,
     pub vae_decoder: VAEDecoder,
-    tokenizer: Tokenizer,
     solver: DPMSolverPP,
     pub speech_scaling_factor: f32,
     pub speech_bias_factor: f32,
@@ -339,7 +338,6 @@ impl VibeVoiceModel {
             semantic_tokenizer,
             vae_encoder,
             vae_decoder,
-            tokenizer,
             solver,
             speech_scaling_factor,
             speech_bias_factor,
@@ -452,8 +450,8 @@ impl VibeVoiceModel {
         // sampled = mean + std_per_batch.unsqueeze(-1).unsqueeze(-1) * randn_like(mean)
         // This adds per-speaker variation which is critical for multi-speaker voice quality
         let batch_size = latents_permuted.dim(0)?;
-        let fix_std = 0.5_f64; // From config.acoustic_tokenizer_config.fix_std
-        let value = fix_std / 0.8; // = 0.625
+        let fix_std = self.config.acoustic_tokenizer_config.fix_std;
+        let value = fix_std / 0.8;
 
         // Use CPU RNG for voice embedding (seeded_randn for deterministic results).
         //
@@ -587,7 +585,7 @@ impl VibeVoiceModel {
     /// Input formats:
     ///   - base_embeds: [batch, seq_len, hidden_size] - token embeddings (batch is typically 1)
     ///   - voice_embeds: [total_valid_tokens, hidden_size] - flattened voice embeddings (from multi-speaker)
-    ///                   OR [num_tokens, hidden_size] - single speaker embeddings
+    ///     OR [num_tokens, hidden_size] - single speaker embeddings
     ///   - injection_mask: [batch, seq_len] or [seq_len] - boolean mask marking positions to inject
     ///
     /// Output: [batch, seq_len, hidden_size] - embeddings with voice injected
@@ -639,8 +637,8 @@ impl VibeVoiceModel {
         let mut voice_idx: usize = 0;
         let mut marked_count: usize = 0;
 
-        for pos in 0..seq_len {
-            if mask_vec[pos] == 1 {
+        for (pos, &mask_val) in mask_vec.iter().enumerate().take(seq_len) {
+            if mask_val == 1 {
                 marked_count += 1;
                 if voice_idx < num_voice_tokens {
                     // Select from voice: index = seq_len + voice_idx
@@ -827,7 +825,11 @@ impl VibeVoiceModel {
         if tracing::enabled!(tracing::Level::DEBUG) {
             let noise_rms = speech.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
             let pos_cond_rms = condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-            let neg_cond_rms = neg_condition.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+            let neg_cond_rms = neg_condition
+                .sqr()?
+                .mean_all()?
+                .sqrt()?
+                .to_scalar::<f32>()?;
             info!(
                 "[DIFF] Initial noise RMS: {:.6}, pos_cond_rms={:.6}, neg_cond_rms={:.6}",
                 noise_rms, pos_cond_rms, neg_cond_rms
@@ -878,7 +880,11 @@ impl VibeVoiceModel {
             // Per-step diagnostic (matches Python's [DIFF Step N] logging)
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let cond_eps_rms = cond_output.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
-                let uncond_eps_rms = uncond_output.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
+                let uncond_eps_rms = uncond_output
+                    .sqr()?
+                    .mean_all()?
+                    .sqrt()?
+                    .to_scalar::<f32>()?;
                 let half_eps_rms = half_output.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
                 let speech_rms = half.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
                 info!(
@@ -1107,6 +1113,7 @@ impl VibeVoiceModel {
     ///
     /// # Returns
     /// Vec<Tensor> containing all generated audio chunks
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_processed<F>(
         &mut self,
         input_ids: &Tensor,
@@ -1122,8 +1129,8 @@ impl VibeVoiceModel {
         F: FnMut(&Tensor) -> Result<()>,
     {
         // Process voice if provided and is_prefill is true
-        let voice_embeds = if is_prefill && voice_audio.is_some() {
-            Some(self.process_voice_for_injection(voice_audio.unwrap(), speech_masks)?)
+        let voice_embeds = if is_prefill && let Some(va) = voice_audio {
+            Some(self.process_voice_for_injection(va, speech_masks)?)
         } else {
             None
         };
@@ -1199,8 +1206,8 @@ impl VibeVoiceModel {
         let mut neg_custom_embeds: Option<Tensor> = None;
 
         // Create streaming caches for semantic tokenizer and VAE decoder
-        let mut semantic_cache = crate::streaming_cache::StreamingCache::new(self.device.clone());
-        let mut acoustic_cache = crate::streaming_cache::StreamingCache::new(self.device.clone());
+        let mut semantic_cache = crate::streaming_cache::StreamingCache::new();
+        let mut acoustic_cache = crate::streaming_cache::StreamingCache::new();
 
         // Start with EMPTY cache (matching Python's DynamicCache behavior)
         // Python uses DynamicCache() which starts empty - NOT StaticCache with zeros!
@@ -1264,8 +1271,8 @@ impl VibeVoiceModel {
                 self.llm
                     .forward_from_embeds(&embeds, seqlen_offset, current_attn_mask)?
             } else if step == 0
-                && voice_embeds.is_some()
-                && speech_input_mask.is_some()
+                && let Some(ve) = voice_embeds
+                && let Some(sim) = speech_input_mask
                 && !used_voice_embeds
             {
                 debug!("🎤 Voice cloning active - injecting voice embeddings");
@@ -1278,20 +1285,11 @@ impl VibeVoiceModel {
                 info!("[DIAG Step0] Base embeddings RMS: {:.6}", base_rms);
 
                 // DIAGNOSTIC: Log voice embeddings RMS
-                let voice_rms = voice_embeds
-                    .unwrap()
-                    .sqr()?
-                    .mean_all()?
-                    .sqrt()?
-                    .to_scalar::<f32>()?;
+                let voice_rms = ve.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?;
                 info!("[DIAG Step0] Voice embeddings RMS: {:.6}", voice_rms);
-                save_debug_tensor("voice_embeddings", voice_embeds.unwrap());
+                save_debug_tensor("voice_embeddings", ve);
 
-                let injected_embeds = self.inject_voice_embeddings(
-                    &base_embeds,
-                    voice_embeds.unwrap(),
-                    speech_input_mask.unwrap(),
-                )?;
+                let injected_embeds = self.inject_voice_embeddings(&base_embeds, ve, sim)?;
 
                 // DIAGNOSTIC: Log injected embeddings RMS
                 let injected_rms = injected_embeds
@@ -1579,7 +1577,11 @@ impl VibeVoiceModel {
                         "📊 Token {}: audio_rms={:.6}, acoustic_rms={:.6}, semantic_rms={:.6}, combined_rms={:.6}",
                         audio_chunks.len() + 1,
                         audio_rms,
-                        acoustic_latent.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?,
+                        acoustic_latent
+                            .sqr()?
+                            .mean_all()?
+                            .sqrt()?
+                            .to_scalar::<f32>()?,
                         semantic_rms,
                         combined_rms
                     );

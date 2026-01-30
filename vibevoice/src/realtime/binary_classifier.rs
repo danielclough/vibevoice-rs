@@ -209,7 +209,7 @@ mod tests {
 
         // Probability should be close to 0.5 with zero weights
         // (may vary slightly due to initialization)
-        assert!(prob >= 0.0 && prob <= 1.0);
+        assert!((0.0..=1.0).contains(&prob));
     }
 
     #[test]

@@ -50,8 +50,8 @@
 use candle_core::{Device, Tensor};
 use rand_mt::Mt; // Mersenne Twister 32-bit (MT19937) to match Python's torch.Generator
 // IMPORTANT: Must use Mt (32-bit), NOT Mt64 (64-bit) - they produce different sequences!
-use std::sync::Mutex;
 use anyhow::{Error as AnyErr, Result};
+use std::sync::Mutex;
 use tracing::{debug, info};
 
 /// Global CPU RNG state for deterministic random generation across all functions.
@@ -423,7 +423,6 @@ mod tests {
     }
 }
 
-
 /// Set all random seeds for full reproducibility across CPU, CUDA, and Metal.
 /// This function must be called BEFORE any model loading to ensure deterministic behavior.
 ///
@@ -488,9 +487,9 @@ pub fn save_rng_state() -> Result<SavedRngState> {
         .lock()
         .map_err(|e| AnyErr::msg(format!("Failed to acquire RNG lock: {}", e)))?;
 
-    let state = rng_guard.as_ref().ok_or_else(|| {
-        AnyErr::msg("RNG not initialized. Call set_all_seeds() first.")
-    })?;
+    let state = rng_guard
+        .as_ref()
+        .ok_or_else(|| AnyErr::msg("RNG not initialized. Call set_all_seeds() first."))?;
 
     Ok(SavedRngState {
         rng: state.rng.clone(),

@@ -26,7 +26,13 @@
 //!
 //! From `modeling_vibevoice_streaming_inference.py:525-704`
 
-use crate::{realtime::{binary_classifier::BinaryClassifier, config::{RealtimeConfig}, split_llm::DualSplitLLM, voice_cache::SafetensorCache}, streaming_cache::StreamingCache};
+use crate::{
+    realtime::{
+        binary_classifier::BinaryClassifier, config::RealtimeConfig, split_llm::DualSplitLLM,
+        voice_cache::SafetensorCache,
+    },
+    streaming_cache::StreamingCache,
+};
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use tracing::debug;
@@ -34,22 +40,22 @@ use tracing::debug;
 /// Configuration for the generation process.
 pub struct GenerationConfig {
     /// CFG scale for classifier-free guidance (default: 1.5)
-    pub cfg_scale: f32,
+    pub _cfg_scale: f32,
     /// Number of diffusion steps (default: 5 for realtime)
-    pub num_diffusion_steps: usize,
+    pub _num_diffusion_steps: usize,
     /// Speech scaling factor for VAE normalization
-    pub speech_scaling_factor: f32,
+    pub _speech_scaling_factor: f32,
     /// Speech bias factor for VAE normalization
-    pub speech_bias_factor: f32,
+    pub _speech_bias_factor: f32,
 }
 
 impl Default for GenerationConfig {
     fn default() -> Self {
         Self {
-            cfg_scale: 1.5,
-            num_diffusion_steps: 5,
-            speech_scaling_factor: 1.0,
-            speech_bias_factor: 0.0,
+            _cfg_scale: 1.5,
+            _num_diffusion_steps: 5,
+            _speech_scaling_factor: 1.0,
+            _speech_bias_factor: 0.0,
         }
     }
 }
@@ -83,7 +89,7 @@ pub struct GenerationState {
     pub neg_tts_lm_cache_position: usize,
 
     /// Streaming cache for VAE decoder
-    pub acoustic_cache: StreamingCache,
+    pub _acoustic_cache: StreamingCache,
 
     /// Whether generation has finished (EOS detected)
     pub finished: bool,
@@ -91,7 +97,7 @@ pub struct GenerationState {
 
 impl GenerationState {
     /// Initialize generation state from a voice cache.
-    pub fn from_voice_cache(voice_cache: &SafetensorCache, device: &Device) -> Result<Self> {
+    pub fn from_voice_cache(voice_cache: &SafetensorCache, _device: &Device) -> Result<Self> {
         let (lm_len, tts_lm_len, neg_lm_len, neg_tts_lm_len) = voice_cache.cache_positions()?;
 
         debug!(
@@ -108,7 +114,7 @@ impl GenerationState {
             tts_lm_cache_position: tts_lm_len,
             neg_lm_cache_position: neg_lm_len,
             neg_tts_lm_cache_position: neg_tts_lm_len,
-            acoustic_cache: StreamingCache::new(device.clone()),
+            _acoustic_cache: StreamingCache::new(),
             finished: false,
         })
     }
@@ -146,7 +152,7 @@ impl GenerationState {
 /// ```
 pub struct WindowedGenerator {
     /// Generation configuration
-    pub config: GenerationConfig,
+    pub _config: GenerationConfig,
     /// Generation state (caches, positions, hidden states)
     pub state: GenerationState,
     /// Device for tensor operations
@@ -180,12 +186,12 @@ impl WindowedGenerator {
             tts_lm_cache_position: 0,
             neg_lm_cache_position: 0,
             neg_tts_lm_cache_position: 0,
-            acoustic_cache: StreamingCache::new(device.clone()),
+            _acoustic_cache: StreamingCache::new(),
             finished: false,
         };
 
         Ok(Self {
-            config: gen_config,
+            _config: gen_config,
             state,
             device,
             hidden_size,
@@ -397,7 +403,6 @@ pub fn text_windows(text_ids: &Tensor, window_size: usize) -> Result<Vec<Tensor>
     Ok(windows)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,7 +446,7 @@ mod tests {
     #[test]
     fn test_generation_config_default() {
         let config = GenerationConfig::default();
-        assert_eq!(config.cfg_scale, 1.5);
-        assert_eq!(config.num_diffusion_steps, 5);
+        assert_eq!(config._cfg_scale, 1.5);
+        assert_eq!(config._num_diffusion_steps, 5);
     }
 }

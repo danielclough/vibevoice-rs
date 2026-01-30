@@ -7,9 +7,11 @@ dist/
 debug/
 
 # Temporary
+*.txt
 *.md
-.*
 *.wav
+*.lock
+.*
 
 # Allowed
 !text_examples/i18n/i18n-reference-output/*.wav

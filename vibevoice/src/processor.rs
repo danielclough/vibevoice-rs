@@ -1,7 +1,7 @@
 use crate::utils::{load_audio_wav, normalize_audio_db_fs};
 use candle_core::{Device, Result, Tensor};
 use regex::Regex;
-use serde_json;
+
 use std::path::{Path, PathBuf};
 use tokenizers::{AddedToken, Tokenizer};
 use tracing::{debug, warn};
@@ -22,7 +22,6 @@ pub struct ProcessorOutput {
     pub input_ids: Tensor,
     pub attention_mask: Option<Tensor>,
     pub voice_embeds: Option<Tensor>,
-    pub voice_masks: Option<Tensor>, // Attention masks for voice samples
     pub speech_input_mask: Option<Tensor>, // Boolean mask marking voice injection positions
     /// Per-speaker VAE token validity masks: [num_speakers][max_vae_tokens]
     /// True = valid token, False = padding (for speakers with shorter audio)
@@ -37,7 +36,6 @@ pub struct VibeVoiceProcessor {
     pub sample_rate: u32,
     pub device: Device,
     pub speech_tok_compress_ratio: usize,
-    pub db_normalize: bool,
 }
 
 impl VibeVoiceProcessor {
@@ -100,7 +98,7 @@ impl VibeVoiceProcessor {
         debug!("✓ Tokenizer loaded with special tokens");
 
         // Try to read preprocessor_config.json for configuration
-        let (speech_tok_compress_ratio, db_normalize) =
+        let speech_tok_compress_ratio =
             match std::fs::read_to_string(model_path.join("preprocessor_config.json")) {
                 Ok(content) => {
                     let config: serde_json::Value =
@@ -110,19 +108,14 @@ impl VibeVoiceProcessor {
                                 e
                             ))
                         })?;
-                    let compress_ratio = config
+                    config
                         .get("speech_tok_compress_ratio")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(3200) as usize;
-                    let db_norm = config
-                        .get("db_normalize")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    (compress_ratio, db_norm)
+                        .unwrap_or(3200) as usize
                 }
                 Err(_) => {
-                    // Default values matching Python
-                    (3200, true)
+                    // Default value matching Python
+                    3200
                 }
             };
 
@@ -131,7 +124,6 @@ impl VibeVoiceProcessor {
             sample_rate: 24000, // VibeVoice uses 24kHz
             device: device.clone(),
             speech_tok_compress_ratio,
-            db_normalize,
         })
     }
 
@@ -386,21 +378,10 @@ impl VibeVoiceProcessor {
             &self.device,
         )?;
 
-        let voice_masks = if voice_embeds.is_some() {
-            Some(Tensor::ones(
-                (seq_len, 1),
-                candle_core::DType::U32,
-                &self.device,
-            )?)
-        } else {
-            None
-        };
-
         Ok(ProcessorOutput {
             input_ids,
             attention_mask,
             voice_embeds,
-            voice_masks,
             speech_input_mask: Some(speech_input_mask_tensor),
             speech_masks,
         })
@@ -413,6 +394,7 @@ impl VibeVoiceProcessor {
     /// - voice_audio: stacked audio tensor [num_speakers, 1, max_samples]
     /// - voice_mask: flat boolean mask marking VAE token positions in voice_tokens
     /// - speech_masks: per-speaker validity masks [num_speakers][max_vae_tokens]
+    #[allow(clippy::type_complexity)]
     fn create_voice_prompt(
         &self,
         voice_samples: &[PathBuf],

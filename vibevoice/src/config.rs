@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 /// Top-level VibeVoice config with nested structures
 #[derive(Debug, Clone, Deserialize)]
 pub struct VibeVoiceConfig {
-    pub model_type: String,
+    _model_type: String,
     #[serde(alias = "decoder_config")]
     pub llm_config: LLMConfig,
     pub diffusion_head_config: DiffusionHeadConfig,
@@ -127,7 +127,7 @@ impl VibeVoiceConfig {
             max_position_embeddings: lc.max_position_embeddings,
             sliding_window: lc.sliding_window.unwrap_or(lc.max_position_embeddings),
             max_window_layers: lc.max_window_layers,
-            tie_word_embeddings: false,
+            tie_word_embeddings: lc.tie_word_embeddings,
             rope_theta: lc.rope_theta,
             rms_norm_eps: lc.rms_norm_eps,
             use_sliding_window: lc.use_sliding_window,
@@ -190,30 +190,31 @@ impl LLMConfig {
 
 /// Nested diffusion head config matching Python VibeVoiceDiffusionHeadConfig
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct DiffusionHeadConfig {
-    pub ddpm_batch_mul: usize,
-    pub ddpm_beta_schedule: String,
+    pub(crate) _ddpm_batch_mul: usize,
+    pub(crate) _ddpm_beta_schedule: String,
     pub ddpm_num_inference_steps: usize,
     pub ddpm_num_steps: usize,
-    pub ddpm_prediction_type: Option<String>,
-    pub head_ffn_ratio: f64,
+    pub(crate) _ddpm_prediction_type: Option<String>,
+    pub(crate) head_ffn_ratio: f64,
     pub head_layers: usize,
-    pub hidden_size: usize,
+    pub(crate) hidden_size: usize,
     pub latent_size: usize,
-    pub model_type: String,
-    pub prediction_type: String,
-    pub rms_norm_eps: f64,
-    pub speech_vae_dim: usize,
+    pub(crate) _model_type: String,
+    pub(crate) _prediction_type: String,
+    pub(crate) rms_norm_eps: f64,
+    pub(crate) speech_vae_dim: usize,
 }
 /// Acoustic Tokenizer Configuration matching Python VibeVoiceAcousticTokenizerConfig
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcousticTokenizerConfig {
     pub channels: usize,
-    pub corpus_normalize: f64,
+    pub(crate) _corpus_normalize: f64,
     pub causal: bool,
     pub vae_dim: usize,
     pub fix_std: f64,
-    pub std_dist_type: String,
+    pub(crate) _std_dist_type: String,
     pub mixer_layer: String,
     pub conv_norm: String,
     pub pad_mode: String,
@@ -223,7 +224,7 @@ pub struct AcousticTokenizerConfig {
     pub layernorm_elementwise_affine: bool,
     pub conv_bias: bool,
     pub layer_scale_init_value: f64,
-    pub weight_init_value: f64,
+    pub(crate) _weight_init_value: f64,
     pub encoder_n_filters: usize,
     pub encoder_ratios: Vec<usize>,
     pub encoder_depths: String,
@@ -234,13 +235,14 @@ pub struct AcousticTokenizerConfig {
 
 /// Semantic Tokenizer Configuration matching Python VibeVoiceSemanticTokenizerConfig
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct SemanticTokenizerConfig {
     pub channels: usize,
-    pub corpus_normalize: f64,
+    _corpus_normalize: f64,
     pub causal: bool,
     pub vae_dim: usize,
-    pub fix_std: f64,
-    pub std_dist_type: String,
+    _fix_std: f64,
+    _std_dist_type: String,
     pub mixer_layer: String,
     pub conv_norm: String,
     pub pad_mode: String,
@@ -250,7 +252,7 @@ pub struct SemanticTokenizerConfig {
     pub layernorm_elementwise_affine: bool,
     pub conv_bias: bool,
     pub layer_scale_init_value: f64,
-    pub weight_init_value: f64,
+    _weight_init_value: f64,
     pub encoder_n_filters: usize,
     pub encoder_ratios: Vec<usize>,
     pub encoder_depths: String,
@@ -276,13 +278,13 @@ pub struct VAEDecoderConfig {
     /// Last layer kernel size
     pub last_kernel_size: usize,
     /// Normalization type for convolutions ('none', 'weight_norm', etc.)
-    pub conv_norm: String,
+    _conv_norm: String,
     /// Padding mode ('constant', 'reflect', etc.)
     pub pad_mode: String,
     /// Whether convolutions have bias
     pub conv_bias: bool,
     /// Layer normalization type ('RMSNorm' or 'LN')
-    pub layernorm: String,
+    _layernorm: String,
     /// Layer normalization epsilon
     pub layernorm_eps: f64,
     /// Whether to use elementwise affine in layernorm
@@ -310,10 +312,10 @@ impl Default for VAEDecoderConfig {
             causal: true,
             kernel_size: 7,
             last_kernel_size: 7,
-            conv_norm: "none".to_string(),
+            _conv_norm: "none".to_string(),
             pad_mode: "constant".to_string(),
             conv_bias: true,
-            layernorm: "RMSNorm".to_string(),
+            _layernorm: "RMSNorm".to_string(),
             layernorm_eps: 1e-5,
             layernorm_elementwise_affine: true,
             mixer_layer: "depthwise_conv".to_string(),
@@ -357,10 +359,10 @@ impl VAEDecoderConfig {
             causal: ac.causal,
             kernel_size: 7,      // Python default
             last_kernel_size: 7, // Python default
-            conv_norm: ac.conv_norm.clone(),
+            _conv_norm: ac.conv_norm.clone(),
             pad_mode: ac.pad_mode.clone(),
             conv_bias: ac.conv_bias,
-            layernorm: ac.layernorm.clone(),
+            _layernorm: ac.layernorm.clone(),
             layernorm_eps: ac.layernorm_eps,
             layernorm_elementwise_affine: ac.layernorm_elementwise_affine,
             mixer_layer: ac.mixer_layer.clone(),
